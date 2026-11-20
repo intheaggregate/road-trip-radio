@@ -71,6 +71,13 @@ private enum BuilderSearch: String, Identifiable {
             if !message.isEmpty { Section { Text(message).font(.footnote) } }
         }
         .navigationTitle("Create a soundtrack").navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            if route != nil {
+                ToolbarItem(placement:.primaryAction) {
+                    Button("Save") { save() }.disabled(working || (try? finalProgram()) == nil)
+                }
+            }
+        }
         .sheet(item:$search) { target in
             PlaceSearch(title:target.rawValue,near:searchCenter(target)) { item in
                 switch target {
@@ -123,8 +130,23 @@ private enum BuilderSearch: String, Identifiable {
         Section {
             TextField("Music you love, artists, or sounds you avoid",text:$taste,axis:.vertical).lineLimit(1...5)
             TextField("Anything different for this drive?",text:$tripNote,axis:.vertical).lineLimit(1...4)
+            if !station.savedRituals.isEmpty {
+                DisclosureGroup("Saved song rituals") {
+                    ForEach(station.savedRituals) { ritual in
+                        HStack {
+                            VStack(alignment:.leading) {
+                                Text(ritual.track.title + " · " + ritual.track.artist)
+                                Text(ritual.trigger == .highwayOpening ? "First highway stretch" : ritual.label).font(.caption)
+                            }
+                            Spacer()
+                            Button { station.forgetRitual(ritual.id) } label: { Image(systemName:"minus.circle") }
+                                .accessibilityLabel("Forget ritual for " + ritual.track.title)
+                        }
+                    }
+                }
+            }
             if !station.avoidedSuggestions.isEmpty {
-                DisclosureGroup("Songs to avoid on future drives") {
+                DisclosureGroup("Songs to avoid in future drafts") {
                     ForEach(station.avoidedSuggestions,id:\.key) { song in
                         Button { station.allowSuggestion(song) } label: {
                             HStack { Text(song.title + " · " + song.artist); Spacer(); Image(systemName:"minus.circle") }
@@ -196,7 +218,7 @@ private enum BuilderSearch: String, Identifiable {
                         else {
                             Menu {
                                 Button("Skip for this chapter") { reject(track,in:slot,standing:false) }
-                                Button("Avoid on future drives") { reject(track,in:slot,standing:true) }
+                                Button("Avoid in future drafts") { reject(track,in:slot,standing:true) }
                             } label: { Image(systemName:"ellipsis.circle") }.accessibilityLabel("Options for " + track.title)
                         }
                     }
@@ -375,7 +397,7 @@ private struct RoutePinPicker: View {
                     Map(position:$camera) {
                         MapPolyline(route.line).stroke(Color.accentColor,lineWidth:4)
                         if let p = selected { Marker("Musical moment",coordinate:p.coordinate) }
-                    }.onTapGesture { tap in
+                    }.onTapGesture(coordinateSpace:.local) { tap in
                         if let coordinate = proxy.convert(tap,from:.local) { selected = Point(coordinate) }
                     }
                 }

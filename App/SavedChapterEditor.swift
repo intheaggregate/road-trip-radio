@@ -69,6 +69,7 @@ import SwiftUI
                     Button("Save chapter changes") { save(draft) }
                         .disabled(task != nil || selected.isEmpty || !parked)
                 } header: { Text("Choose replacements") }
+                CatalogCheck(tracks:draft.tracks.filter(selected.contains))
             }
             if !message.isEmpty { Text(message).font(.footnote) }
         }

@@ -84,22 +84,30 @@ struct ListeningStretch: Equatable {
         }
         cuts.sort()
         if cuts.count == 2 {
-            cuts = (0...fallbackCount).map { lower + (upper-lower) * Double($0) / Double(fallbackCount) }
+            let stride = (upper - lower) / Double(fallbackCount)
+            cuts = (0...fallbackCount).map { (index: Int) -> Double in lower + stride * Double(index) }
         }
         // Preserve all retained terrain transitions. Split the longest stretches if
         // the drive still needs more listening chapters by duration alone.
         while cuts.count <= fallbackCount {
-            let longest = (1..<cuts.count).max { a,b in cuts[a]-cuts[a-1] < cuts[b]-cuts[b-1] }!
-            cuts.insert((cuts[longest] + cuts[longest-1])/2,at:longest)
+            var longest = 1
+            var span = cuts[1] - cuts[0]
+            for end in 1..<cuts.count {
+                let candidate = cuts[end] - cuts[end - 1]
+                if candidate > span { longest = end; span = candidate }
+            }
+            let halfway = cuts[longest - 1] + span / 2
+            cuts.insert(halfway,at:longest)
         }
-        return zip(cuts,cuts.dropFirst()).map { a,b in
+        return zip(cuts,cuts.dropFirst()).map { (a: Double,b: Double) -> ListeningStretch in
             var label: String?
             if valid {
                 let indices = samples.indices.filter { a <= samples[$0].distance && samples[$0].distance <= b }
                 if let first = indices.first, let last = indices.last, indices.count >= 3,
                    samples[last].distance - samples[first].distance >= (b-a)*0.5 {
                     let measured = indices.map { bands[$0] }
-                    let votes = [Terrain.level,.rolling,.change].map { kind in (kind,measured.filter { $0 == kind }.count) }
+                    let kinds: [Terrain] = [.level,.rolling,.change]
+                    let votes: [(Terrain,Int)] = kinds.map { kind in (kind,measured.filter { $0 == kind }.count) }
                     if let strongest = votes.max(by:{ $0.1 < $1.1 }), strongest.1 * 5 >= measured.count * 3 {
                         label = strongest.0.label
                     } else { label = "changing elevation" }

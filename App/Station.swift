@@ -164,6 +164,13 @@ final class Station: ObservableObject {
         if enabled, let fixed = slot.lockedTrack {
             savedRituals.append(SavedRitual(trigger:slot.trigger,place:slot.path.first,label:slot.label,track:fixed))
         }
+        persistRituals()
+    }
+    func forgetRitual(_ id: UUID) {
+        savedRituals.removeAll { $0.id == id }
+        persistRituals()
+    }
+    private func persistRituals() {
         if let data = try? JSONEncoder().encode(savedRituals) { UserDefaults.standard.set(data,forKey:"radio.rituals") }
     }
     func applyRituals(to slots: [SoundtrackSlot]) -> [SoundtrackSlot] {
