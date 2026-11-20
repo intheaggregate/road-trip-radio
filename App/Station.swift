@@ -23,12 +23,27 @@ struct AirLog: Identifiable {
     let pick: Pick
 }
 
+struct SavedRitual: Codable, Identifiable {
+    var id = UUID()
+    let trigger: CueTrigger
+    let place: Point?
+    let label: String
+    let track: CueTrack
+
+    func matches(_ slot: SoundtrackSlot) -> Bool {
+        guard slot.trigger == trigger else { return false }
+        if trigger == .highwayOpening { return true }
+        guard let place, let point = slot.path.first else { return false }
+        return place.distance(to:point) <= max(500,slot.radius)
+    }
+}
+
 @MainActor
 final class Station: ObservableObject {
     let spotify = Spotify()
     let gps = TripGPS()
     let cloud = CloudRadio()
-    private let music = MusicMap()
+    private let music = MusicMap.shared
     private let prefKey = "radio.preferences.v1"
     @Published private var prefs: Preferences
     @Published private(set) var connected = false
@@ -56,6 +71,10 @@ final class Station: ObservableObject {
     private let bundledProgram: DriveProgram?
     private let programsKey = "radio.drivePrograms.v1"
     @Published private var importedPrograms: [DriveProgram] = []
+    @Published private(set) var avoidedSuggestions: [CueTrack] =
+        UserDefaults.standard.data(forKey:"radio.avoidedSuggestions").flatMap { try? JSONDecoder().decode([CueTrack].self,from:$0) } ?? []
+    @Published private(set) var savedRituals: [SavedRitual] =
+        UserDefaults.standard.data(forKey:"radio.rituals").flatMap { try? JSONDecoder().decode([SavedRitual].self,from:$0) } ?? []
     private var programDrive = ProgramDrive()
     private var localStories: [Story] = []
     @Published private var routeStories: [Story] = []
@@ -124,6 +143,60 @@ final class Station: ObservableObject {
         guard !driving, !starting else { return }
         prefs.selectedProgramName = name
         save()
+    }
+    func avoidSuggestion(_ track: CueTrack) {
+        avoidedSuggestions.removeAll { $0.key == track.key }
+        avoidedSuggestions = Array((avoidedSuggestions + [track]).suffix(40))
+        persistAvoidedSuggestions()
+    }
+    func allowSuggestion(_ track: CueTrack) {
+        avoidedSuggestions.removeAll { $0.key == track.key }
+        persistAvoidedSuggestions()
+    }
+    private func persistAvoidedSuggestions() {
+        if let data = try? JSONEncoder().encode(avoidedSuggestions) {
+            UserDefaults.standard.set(data,forKey:"radio.avoidedSuggestions")
+        }
+    }
+    func rememberRitual(_ slot: SoundtrackSlot, enabled: Bool) {
+        guard [.departure,.arrival,.bookend,.highwayOpening].contains(slot.trigger) else { return }
+        savedRituals.removeAll { $0.matches(slot) }
+        if enabled, let fixed = slot.lockedTrack {
+            savedRituals.append(SavedRitual(trigger:slot.trigger,place:slot.path.first,label:slot.label,track:fixed))
+        }
+        if let data = try? JSONEncoder().encode(savedRituals) { UserDefaults.standard.set(data,forKey:"radio.rituals") }
+    }
+    func applyRituals(to slots: [SoundtrackSlot]) -> [SoundtrackSlot] {
+        var updated = slots.map { slot -> SoundtrackSlot in
+            var next = slot
+            if let ritual = savedRituals.first(where:{ $0.matches(slot) }) { next.lockedTrack = ritual.track }
+            return next
+        }
+        for ritual in savedRituals where ritual.trigger == .bookend {
+            for endpoint in slots where endpoint.trigger == .departure || endpoint.trigger == .arrival {
+                var bookend = SoundtrackSlot(id:"bookend-" + ritual.id.uuidString.lowercased(),label:ritual.label,
+                                             trigger:.bookend,path:endpoint.path,radius:endpoint.radius)
+                if ritual.matches(bookend) {
+                    bookend.lockedTrack = ritual.track; updated.append(bookend); break
+                }
+            }
+        }
+        return updated
+    }
+    func storeProgram(_ candidate: DriveProgram, replacing: Bool = false) throws {
+        guard !driving, !starting else { throw RadioError("End this drive before saving a new soundtrack.") }
+        let program = try candidate.validated()
+        if !replacing, drivePrograms.contains(where:{ $0.name.caseInsensitiveCompare(program.name) == .orderedSame }) {
+            throw RadioError("A soundtrack already has this name. Choose another name to keep both.")
+        }
+        let data = try JSONEncoder().encode(program)
+        var stored = UserDefaults.standard.dictionary(forKey:programsKey) ?? [:]
+        stored[program.name] = data
+        UserDefaults.standard.set(stored,forKey:programsKey)
+        importedPrograms.removeAll { $0.name == program.name }
+        importedPrograms.append(program)
+        selectProgram(program.name)
+        researchStatus = "\(program.name) is ready in Drive."
     }
     func liveMusicStyle(_ drive: DriveContext) -> String? {
         selectedDriveProgram.flatMap { programDrive.musicStyle(in:$0,context:drive) }
@@ -462,15 +535,7 @@ final class Station: ObservableObject {
             guard data.count <= 160_000 else { throw RadioError("Choose a trip JSON file smaller than 160 KB.") }
             let contents = try JSONSerialization.jsonObject(with:data) as? [String:Any]
             if contents?["cues"] != nil {
-                guard !driving, !starting else { throw RadioError("End this drive before importing a new route soundtrack.") }
-                let program = try JSONDecoder().decode(DriveProgram.self,from:data).validated()
-                var stored = UserDefaults.standard.dictionary(forKey:programsKey) ?? [:]
-                stored[program.name] = data
-                UserDefaults.standard.set(stored,forKey:programsKey)
-                importedPrograms.removeAll { $0.name == program.name }
-                importedPrograms.append(program)
-                selectProgram(program.name)
-                researchStatus = "\(program.name) is ready in Drive."
+                try storeProgram(JSONDecoder().decode(DriveProgram.self,from:data),replacing:true)
             } else {
                 merge(try JSONDecoder().decode(ResearchPack.self,from:data).validated())
             }

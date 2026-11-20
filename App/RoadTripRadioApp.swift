@@ -101,9 +101,14 @@ private struct DriveScreen: View {
                     } label: { Label(station.routeBusy ? "Finding route…" : (station.route == nil ? "Plan a drive" : "Change destination"),systemImage:"map") }
                     .disabled(station.routeBusy)
                 }
-                if !station.drivePrograms.isEmpty {
-                    VStack(alignment:.leading,spacing:8) {
-                        Text("Soundtrack").font(editorial(26))
+                VStack(alignment:.leading,spacing:8) {
+                    Text("Soundtrack").font(editorial(26))
+                    NavigationLink {
+                        SoundtrackBuilder(cloud:station.cloud)
+                    } label: {
+                        Label("Create a soundtrack",systemImage:"music.note.list")
+                    }.disabled(station.driving || station.starting).accessibilityIdentifier("Create a soundtrack")
+                    if !station.drivePrograms.isEmpty {
                         Picker("Route soundtrack",selection:Binding(get:{ station.selectedDriveProgram?.name ?? "" },set:{ station.selectProgram($0.isEmpty ? nil : $0) })) {
                             Text("Everyday station").tag("")
                             ForEach(station.drivePrograms,id:\.name) { program in Text(program.name).tag(program.name) }
@@ -150,6 +155,7 @@ private struct DriveProgramPreview: View {
     let program: DriveProgram
     @EnvironmentObject var station: Station
     var body: some View {
+        let current = station.drivePrograms.first { $0.name == program.name } ?? program
         List {
             Section {
                 if station.selectedDriveProgram?.name == program.name {
@@ -161,7 +167,7 @@ private struct DriveProgramPreview: View {
             } footer: {
                 Text("The DJ follows your location and queues each cue at a song break. Personal pins take priority.")
             }
-            ForEach(program.cues,id:\.id) { cue in
+            ForEach(current.cues,id:\.id) { cue in
                 Section {
                     ForEach(cue.tracks,id:\.key) { track in
                         VStack(alignment:.leading,spacing:2) {
@@ -169,7 +175,15 @@ private struct DriveProgramPreview: View {
                             Text(track.artist).font(.subheadline).foregroundStyle(.secondary)
                         }
                     }
-                } header: { Text(cue.label) } footer: { Text(cue.reason) }
+                    if (cue.trigger == .region || cue.trigger == .longStretch) && cue.locked != true && !station.driving && !station.starting {
+                        NavigationLink("Retune this stretch") { SavedChapterEditor(program:current,cue:cue,cloud:station.cloud) }
+                    }
+                } header: { Text(cue.label) } footer: {
+                    VStack(alignment:.leading) {
+                        Text(cue.reason)
+                        if let link = cue.source.flatMap(URL.init(string:)) { Link("Music connection",destination:link) }
+                    }
+                }
             }
         }.navigationTitle(program.name).navigationBarTitleDisplayMode(.inline)
     }

@@ -39,6 +39,19 @@ struct Road {
         }
         distances = totals
     }
+    func point(atDistance distance: Double) -> Point? {
+        guard let first = points.first, distance > 0 else { return points.first }
+        guard let end = distances.firstIndex(where:{ $0 >= distance }), end > 0 else { return points.last ?? first }
+        let a = points[end - 1], b = points[end]
+        let fraction = (distance - distances[end - 1]) / (distances[end] - distances[end - 1])
+        var delta = b.longitude - a.longitude
+        if delta > 180 { delta -= 360 }
+        if delta < -180 { delta += 360 }
+        var longitude = a.longitude + fraction * delta
+        if longitude > 180 { longitude -= 360 }
+        if longitude < -180 { longitude += 360 }
+        return Point(latitude:a.latitude + fraction * (b.latitude - a.latitude),longitude:longitude)
+    }
     func projection(_ point: Point) -> (along: Double, away: Double) {
         var closest = (along: 0.0, away: Double.infinity)
         for index in points.indices.dropFirst() {
@@ -147,7 +160,7 @@ enum CuePriority: Int {
 }
 
 enum CueTrigger: String, Codable {
-    case departure, bookend, approach, highwayOpening, region, longStretch, nearby
+    case departure, arrival, bookend, approach, highwayOpening, region, longStretch, nearby
 }
 
 struct CueTrack: Codable, Hashable {
@@ -156,7 +169,7 @@ struct CueTrack: Codable, Hashable {
     var key: String { "program|\(artist.lowercased())|\(title.lowercased())" }
 }
 
-struct DriveCue: Codable {
+struct DriveCue: Codable, Equatable {
     let id: String
     let trigger: CueTrigger
     let label: String
@@ -165,6 +178,8 @@ struct DriveCue: Codable {
     let path: [Point]
     let radius: Double
     var musicStyle: String? = nil
+    var source: String? = nil
+    var locked: Bool? = nil
 
     func projection(_ point: Point) -> (along: Double, away: Double) {
         if path.count == 1 { return (0, point.distance(to:path[0])) }
@@ -176,13 +191,14 @@ struct DriveProgram: Codable {
     let version: Int
     let name: String
     let cues: [DriveCue]
+    var origin: Point? = nil
 
     func validated() throws -> DriveProgram {
         func text(_ value: String, _ limit: Int) -> Bool {
             !value.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty && value.count <= limit &&
                 value.rangeOfCharacter(from:.controlCharacters) == nil
         }
-        guard version == 1, text(name,160), (1...60).contains(cues.count),
+        guard version == 1, text(name,160), origin?.valid != false, (1...60).contains(cues.count),
               Set(cues.map(\.id)).count == cues.count else { throw RadioError("Choose a version 1 driving program with unique cues.") }
         for cue in cues {
             guard text(cue.id,90), text(cue.label,160), text(cue.reason,450),
@@ -191,12 +207,16 @@ struct DriveProgram: Codable {
                   cue.path.count <= 150, cue.path.allSatisfy(\.valid), (0...120000).contains(cue.radius),
                   cue.radius > 0 || (cue.trigger == .highwayOpening && cue.path.isEmpty),
                   cue.musicStyle.map({ text($0,160) }) ?? true else { throw RadioError("A driving cue has invalid songs, text, or coordinates.") }
+            if let source = cue.source {
+                guard let url = URL(string:source), url.scheme == "https", url.host?.isEmpty == false,
+                      url.user == nil, url.password == nil, source.count <= 2048 else { throw RadioError("A driving cue has an invalid source link.") }
+            }
             switch cue.trigger {
             case .approach:
                 guard cue.path.count >= 2, Road(points:cue.path,duration:0).length > 30 else {
                     throw RadioError("An approach needs a path ending at its landmark.")
                 }
-            case .departure, .bookend:
+            case .departure, .arrival, .bookend:
                 guard cue.path.count == 1 else { throw RadioError("A trip endpoint needs one center point.") }
             case .highwayOpening: break
             case .nearby, .region, .longStretch:
@@ -242,6 +262,10 @@ struct ProgramDrive {
         guard let program else { return }
         for cue in program.cues {
             switch cue.trigger {
+            case .arrival:
+                if let center = cue.path.first, center.distance(to:context.point) > cue.radius + min(300,cue.radius / 2) {
+                    seenOutside.insert(cue.id)
+                }
             case .departure, .bookend:
                 if let center = cue.path.first, center.distance(to:context.point) > cue.radius + 8000 {
                     seenOutside.insert(cue.id)
@@ -296,6 +320,10 @@ struct ProgramDrive {
 
     private func opening(_ context: DriveContext, program: DriveProgram) -> Bool {
         guard context.elapsed <= 5400, let origin, origin.distance(to:context.point) <= 95000 else { return false }
+        if let start = program.origin {
+            let radius = program.cues.first { $0.trigger == .departure }?.radius ?? 2500
+            return origin.distance(to:start) <= radius
+        }
         return program.cues.contains { cue in
             (cue.trigger == .bookend || cue.trigger == .departure) && cue.path.first.map { origin.distance(to:$0) <= cue.radius } == true
         }
@@ -305,6 +333,11 @@ struct ProgramDrive {
     private func window(_ cue: DriveCue, program: DriveProgram, context: DriveContext) -> Window? {
         guard let origin else { return nil }
         switch cue.trigger {
+        case .arrival:
+            guard let center = cue.path.first, seenOutside.contains(cue.id),
+                  center.distance(to:context.point) <= cue.radius else { return nil }
+            if let destination = context.road?.points.last, destination.distance(to:center) > cue.radius + 1000 { return nil }
+            return ("arrival",.bookend,0)
         case .departure, .bookend:
             guard let center = cue.path.first else { return nil }
             let inCity = center.distance(to:context.point) <= cue.radius
@@ -357,7 +390,7 @@ struct ProgramDrive {
                 let perTrack = match.priority == .regional || match.priority == .bookend ? "|" + track.key : ""
                 let departureID = match.phase == "in" ? "program|\(cue.id)|out" + perTrack : nil
                 return Moment(id:"program|\(cue.id)|\(match.phase)" + perTrack,point:context.point,song:song,
-                              reason:cue.reason,source:nil,personal:false,cuePriority:match.priority,estimatedETA:match.eta,
+                              reason:cue.reason,source:cue.source.flatMap(URL.init(string:)),personal:false,cuePriority:match.priority,estimatedETA:match.eta,
                               returnFromID:departureID)
             }
         }

@@ -54,6 +54,30 @@ final class ProgramTests: XCTestCase {
         XCTAssertTrue(picks(drive,pack,passingThrough).isEmpty)
     }
 
+    func testGeneratedArrivalOnlyPlaysAfterEnteringDestinationOnAShortDrive() {
+        var arrival = cue("last",.arrival,[point(4200)],400)
+        arrival.source = "https://music.example/recording"
+        let pack = program(arrival)
+        var drive = ProgramDrive()
+        drive.observe(scene(4200,0),program:pack)
+        XCTAssertNil(selected(drive,pack,scene(4200,0)))
+        drive.observe(scene(2600,200),program:pack)
+        let near = scene(4100,330)
+        drive.observe(near,program:pack)
+        XCTAssertEqual(selected(drive,pack,near)?.source?.absoluteString,arrival.source)
+    }
+
+    func testHighwayOnlyProgramUsesMappedOriginAndPreservesEntryRitual() {
+        var pack = program(cue("freeway",.highwayOpening,[],0))
+        pack.origin = point(0)
+        var drive = ProgramDrive()
+        drive.observe(scene(0,0,speed:1),program:pack)
+        drive.observe(scene(700,50,speed:21),program:pack)
+        let entry = scene(950,62,speed:22)
+        drive.observe(entry,program:pack)
+        XCTAssertEqual(selected(drive,pack,entry)?.song.id,"freeway")
+    }
+
     func testFirstHighwayTransitionNeedsCityOriginAndSustainedSpeed() {
         let pack = program(cue("city",.bookend,[point(0)],4000),cue("freeway",.highwayOpening,[],0))
         var drive = ProgramDrive()

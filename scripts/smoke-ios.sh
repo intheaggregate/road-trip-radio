@@ -32,7 +32,12 @@ xcrun simctl launch "$device" app.roadtripradio.personal
 for attempt in 1 2 3 4 5; do
   sleep 4
   xcrun simctl io "$device" screenshot "$out/Drive.png"
-  if "$out/check-screen" "$out/Drive.png"; then exit 0; fi
+  if "$out/check-screen" "$out/Drive.png"; then
+    xcodebuild -project RoadTripRadio.xcodeproj -scheme RoadTripRadio -configuration Debug \
+      -destination "id=$device" -derivedDataPath "$out/sim" -parallel-testing-enabled NO \
+      -only-testing:RoadTripRadioUITests test
+    exit 0
+  fi
 done
 echo "The iPhone did not display the Drive screen." >&2
 exit 1

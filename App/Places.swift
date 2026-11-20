@@ -108,6 +108,7 @@ struct Town {
 
 /// An addressable source for recording credits and artist origins, independently of Spotify.
 actor MusicMap {
+    static let shared = MusicMap()
     private var nextRequest = Date.distantPast
     private var cache: [String:[Story]] = [:]
     private let identity = "RoadTripRadio/1.0 (https://github.com/intheaggregate/road-trip-radio)"
