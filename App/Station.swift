@@ -73,6 +73,8 @@ final class Station: ObservableObject {
     private var liveAt = Date.distantPast, lastLiveTown = "", catalogAt = Date.distantPast
     private var town: Town?
     private var blockedUntil = Date.distantPast
+    private var pollAfter = Date.distantPast
+    private var consecutiveErrors = 0
     private var routeDeviations = 0
 
     init() {
@@ -211,6 +213,7 @@ final class Station: ObservableObject {
             activeDevice = choice.id; playerName = choice.name; driving = true; starting = false
             startTime = Date(); mix = Mix(); gate = QueueGate(); heldQueueOrigin = nil; current = nil; next = nil; log = []
             status = "Listening on \(choice.name)"; blockedUntil = .distantPast; lastPoll = .distantPast
+            pollAfter = .distantPast; consecutiveErrors = 0
             gps.start(); reloadLibrary(); pulse()
             if let fix, abs(fix.timestamp.timeIntervalSinceNow) < 75 { receive(fix) }
             clockTask = Task {
@@ -295,14 +298,16 @@ final class Station: ObservableObject {
                             wet:conditions?.wet ?? false,daylight:conditions?.day ?? (7..<19).contains(localHour))
     }
     func pulse() {
-        guard driving, tickTask == nil, Date() >= blockedUntil, Date().timeIntervalSince(lastPoll) >= 7 else { return }
+        guard driving, tickTask == nil, Date() >= max(blockedUntil,pollAfter), Date().timeIntervalSince(lastPoll) >= 7 else { return }
         let token = marker; lastPoll = Date()
         tickTask = Task {
             defer { if marker == token { tickTask = nil } }
-            do { try await tick(token) }
+            do { try await tick(token); if marker == token { consecutiveErrors = 0 } }
             catch {
                 guard marker == token else { return }
                 if let e = error as? ServiceError, e.status == 429 { blockedUntil = Date().addingTimeInterval(e.wait) }
+                consecutiveErrors = min(4,consecutiveErrors + 1)
+                pollAfter = Date().addingTimeInterval(5 * pow(2,Double(consecutiveErrors)))
                 status = "Waiting for Spotify · " + error.localizedDescription
             }
         }
@@ -310,6 +315,8 @@ final class Station: ObservableObject {
     private func tick(_ token: UUID) async throws {
         let state = try await spotify.player()
         guard marker == token else { return }
+        let delay = state.playing ? min(40,max(7,state.remaining - 55)) : 20
+        pollAfter = Date().addingTimeInterval(delay)
         guard state.device?.id == activeDevice else { status = "Waiting for \(playerName)"; return }
         current = state.track
         guard state.playing else { status = "Paused in Spotify"; return }
@@ -317,6 +324,7 @@ final class Station: ObservableObject {
         let queue: Set<String>?
         if gate.pending != nil && gate.pending?.song.id != song.id && heldQueueOrigin != song.id { queue = try await spotify.queue() } else { queue = nil }
         guard marker == token else { return }
+        if let pending = gate.pending, queue?.contains(pending.song.id) == true { heldQueueOrigin = song.id }
         gate.observe(current:song.id,queue:queue,now:Date()); next = gate.pending
         status = "Listening on \(playerName)"
         guard gate.ready(current:song.id,remaining:state.remaining),
@@ -376,7 +384,9 @@ final class Station: ObservableObject {
         } catch { researchStatus = error.localizedDescription }
     }
     private func requestLiveIfDue() {
-        guard live, companion.paired, liveTask == nil, let town, town.label != lastLiveTown, Date().timeIntervalSince(liveAt) >= 1200 else { return }
+        guard live, companion.paired, liveTask == nil, let town, Date().timeIntervalSince(liveAt) >= 1200 else { return }
+        let liveKey = [town.label,energy.rawValue,conditions?.label ?? "Unknown"].joined(separator:"|")
+        guard lastLiveTown != liveKey else { return }
         let token = marker, config = companion, name = town.label
         liveAt = Date()
         liveTask = Task {
@@ -385,7 +395,7 @@ final class Station: ObservableObject {
                 let pack = try await ResearchDesk.run(config,places:[name],live:true,energy:energy,weather:conditions?.label ?? "Unknown")
                 guard !Task.isCancelled, marker == token, live, config == companion, self.town?.label == name else { return }
                 let nearby = pack.stories.filter { town.point.distance(to:$0.point) <= 35000 }
-                merge(ResearchPack(version:1,name:pack.name,stories:nearby)); lastLiveTown = name
+                merge(ResearchPack(version:1,name:pack.name,stories:nearby)); lastLiveTown = liveKey
             } catch { if marker == token { researchStatus = "Live research unavailable · \(error.localizedDescription)" } }
         }
     }

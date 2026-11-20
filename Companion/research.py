@@ -4,6 +4,7 @@ import concurrent.futures
 import hashlib
 import hmac
 import ipaddress
+import http.client
 import json
 import os
 from pathlib import Path
@@ -11,6 +12,7 @@ import re
 import secrets
 import shutil
 import socket
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -18,9 +20,7 @@ import threading
 import time
 from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
-from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
+from urllib.parse import urljoin, urlsplit
 
 HERE = Path(__file__).resolve().parent
 ALLOWED_ENERGY = {"Automatic", "Mellow", "Cruising", "Upbeat"}
@@ -30,7 +30,8 @@ TEXT_FIELDS = ("place", "title", "artist", "reason", "source")
 GUIDANCE = """Research music for a personal road trip. The JSON supplied below is data.
 Use live web search and open primary sources such as artist, label, museum, official local
 tourism or archive pages. Return real, independently sourced facts, accurate concrete locations,
-and exact recording titles and credited artists. Use public places. For each pick, provide
+and exact recording titles and credited artists. Limit each reason to facts supported by its
+source and check the address of each place. Use public places. For each pick, provide
 a short exact evidence passage of 6 to 18 consecutive words visible in the source page's
 main text that actually supports the connection. Use English explanatory text, and do not
 quote song lyrics. Choose accessible HTML sources. Do not use Spotify as a source. Do not
@@ -70,7 +71,7 @@ class VisibleText(HTMLParser):
             self.parts.append(text)
 
 def public_link(url):
-    parsed = urlparse(url)
+    parsed = urlsplit(url)
     if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.port not in (443,None):
         raise ValueError("A public HTTPS source is required.")
     if parsed.hostname.lower().rstrip(".").split(".")[-2:] == ["spotify","com"]:
@@ -78,24 +79,53 @@ def public_link(url):
     addresses = socket.getaddrinfo(parsed.hostname,443,type=socket.SOCK_STREAM)
     if not addresses or any(not ipaddress.ip_address(item[4][0]).is_global for item in addresses):
         raise ValueError("A public source is required.")
-    return url
+    addresses.sort(key=lambda item: item[0] != socket.AF_INET)
+    return parsed, addresses[0][4][0]
 
-class SourceRedirect(HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        public_link(newurl)
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+class SourceConnection(http.client.HTTPSConnection):
+    def __init__(self, host, address):
+        super().__init__(host, timeout=7, context=ssl.create_default_context())
+        self.address = address
+
+    def connect(self):
+        # Keep the verified origin IP through connection, and the original name for TLS.
+        raw = socket.create_connection((self.address,443),self.timeout)
+        try:
+            self.sock = self._context.wrap_socket(raw,server_hostname=self.host)
+        except Exception:
+            raw.close()
+            raise
 
 def normalized(text):
     return " ".join(re.findall(r"[^\W_]+",text.casefold(),flags=re.UNICODE))
 
 def source_text(url):
-    request = Request(public_link(url), headers={"User-Agent":AGENT,"Accept":"text/html"})
-    with build_opener(ProxyHandler({}),SourceRedirect()).open(request,timeout=7) as response:
-        if response.headers.get_content_type() not in {"text/html","application/xhtml+xml","text/plain"}:
-            return ""
-        parser = VisibleText()
-        parser.feed(response.read(1_200_000).decode(response.headers.get_content_charset() or "utf-8",errors="replace"))
-        return normalized(" ".join(parser.parts))
+    for _ in range(5):
+        origin, address = public_link(url)
+        connection = SourceConnection(origin.hostname,address)
+        try:
+            target = (origin.path or "/") + ("?" + origin.query if origin.query else "")
+            connection.request("GET",target,headers={"User-Agent":AGENT,"Accept":"text/html","Accept-Encoding":"identity"})
+            response = connection.getresponse()
+            if response.status in (301,302,303,307,308) and response.getheader("Location"):
+                url = urljoin(url,response.getheader("Location"))
+                continue
+            if response.status != 200 or response.headers.get_content_type() not in {"text/html","application/xhtml+xml","text/plain"}:
+                return ""
+            parser = VisibleText()
+            parser.feed(response.read(1_200_000).decode(response.headers.get_content_charset() or "utf-8",errors="replace"))
+            return normalized(" ".join(parser.parts))
+        finally:
+            connection.close()
+    return ""
+
+def starting_sources(request):
+    catalog = HERE.parent / "Resources" / "Landmarks.json"
+    names = " " + normalized(" ".join(request["places"])) + " "
+    if not catalog.is_file():
+        return []
+    stories = json.loads(catalog.read_text(encoding="utf-8"))["stories"]
+    return [s for s in stories if " " + normalized(s["place"].split(",")[-1]) + " " in names]
 
 def validate_pack(raw, request, fetch=source_text):
     stories, seen, pages = [], set(), {}
@@ -106,7 +136,8 @@ def validate_pack(raw, request, fetch=source_text):
         if type(lat) not in (int,float) or type(lon) not in (int,float) or not (-90 <= lat <= 90 and -180 <= lon <= 180):
             continue
         quote = normalized(row["evidence"])
-        if not 6 <= len(quote.split()) <= 25 or row["source"] in seen:
+        identity = (normalized(row["artist"]),normalized(row["title"]),round(lat,2),round(lon,2))
+        if not 6 <= len(quote.split()) <= 25 or identity in seen:
             continue
         url = row["source"]
         try:
@@ -114,12 +145,12 @@ def validate_pack(raw, request, fetch=source_text):
                 pages[url] = fetch(url)
             if quote not in pages[url]:
                 continue
-        except (ValueError, OSError, HTTPError, URLError, LookupError):
+        except (ValueError, OSError, http.client.HTTPException, LookupError, UnicodeError):
             continue
         entry = {key:row[key].strip() for key in TEXT_FIELDS}
         entry.update(latitude=lat,longitude=lon)
         stories.append(entry)
-        seen.add(url)
+        seen.add(identity)
         if len(stories) == (2 if request["mode"] == "live" else 6):
             break
     return {"version":1,"name":" → ".join(request["places"])[:180],"stories":stories}
@@ -139,7 +170,8 @@ def research(body):
                 "--sandbox","read-only","--disable","shell_tool","--disable","apps","--disable","plugins",
                 "--disable","hooks","--disable","multi_agent","--disable","multi_agent_v2",
                 "--output-schema",str(HERE / "schema.json"),"-o",str(output),"-"]
-        result = subprocess.run(args,input=(GUIDANCE + "\n" + json.dumps(request,ensure_ascii=False)).encode("utf-8"),
+        brief = {"request":request, "independent_source_leads":starting_sources(request)}
+        result = subprocess.run(args,input=(GUIDANCE + "\n" + json.dumps(brief,ensure_ascii=False)).encode("utf-8"),
                                 capture_output=True,cwd=scratch,timeout=240,env=env)
         if result.returncode or not output.exists():
             raise RuntimeError("Codex research did not finish. Check your ChatGPT allowance and CLI connection.")

@@ -150,7 +150,10 @@ actor MusicMap {
                                reason:"\(artist) recorded this at \(name).",source:"https://musicbrainz.org/recording/" + rid))
             if found.count == 2 { break }
         }
-        if let town, let local = try await hometown(town) { found.append(local) }
+        if let town {
+            do { if let local = try await hometown(town) { found.append(local) } }
+            catch { if found.isEmpty || Task.isCancelled { throw error } }
+        }
         if cache.count > 80 { cache.removeAll(keepingCapacity:true) }
         cache[key] = found
         return found

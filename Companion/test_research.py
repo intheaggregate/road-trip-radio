@@ -12,12 +12,15 @@ ENTRY = {"place":"A studio","latitude":35.1,"longitude":-90.2,"title":"A Song","
 
 class ResearchTests(unittest.TestCase):
     def test_valid_evidence_and_rejection(self):
-        data = {"stories":[ENTRY, ENTRY | {"source":"https://example.org/no","evidence":"A different passage with enough words."},
+        data = {"stories":[ENTRY, ENTRY | {"title":"Another Song","source":"https://example.org/no","evidence":"A different passage with enough words."},
                            ENTRY | {"latitude":101}, ENTRY]}
         pack = validate_pack(data,context(BODY),lambda url:normalized(PASSAGE))
         self.assertEqual(len(pack["stories"]),1)
         self.assertNotIn("evidence",pack["stories"][0])
         self.assertEqual(pack["version"],1)
+    def test_one_studio_can_document_two_recordings(self):
+        rows = [ENTRY, ENTRY | {"title":"Another Song"}]
+        self.assertEqual(len(validate_pack({"stories":rows},context(BODY),lambda _:normalized(PASSAGE))["stories"]),2)
     def test_only_named_context(self):
         for bad in (BODY | {"spotify_tracks":["x"]}, BODY | {"places":["a","b"]}, BODY | {"weather":"anything"}, BODY | {"places":["a\nb"]}):
             with self.assertRaises(ValueError): context(bad)
