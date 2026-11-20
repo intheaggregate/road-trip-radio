@@ -46,7 +46,7 @@ enum CloudOAuth {
     static func exchange(_ fields: [String:String], previous: CloudTokens? = nil) async throws -> CloudTokens {
         let reply = try await form(issuer + "/api/accounts/oauth/token",fields.merging(["resource":inferenceResource]) { _,v in v })
         guard let access = reply["access_token"] as? String, !access.isEmpty,
-              let seconds = reply["expires_in"] as? Double, seconds > 0 else { throw RadioError("Incomplete ChatGPT token response.") }
+              let seconds = (reply["expires_in"] as? NSNumber)?.doubleValue, seconds.isFinite, seconds > 0 else { throw RadioError("Incomplete ChatGPT token response.") }
         return CloudTokens(access:access,refresh:reply["refresh_token"] as? String ?? previous?.refresh,
                            identity:reply["id_token"] as? String ?? previous?.identity,
                            scopes:reply["scope"] as? String ?? previous?.scopes ?? "",expires:Date().addingTimeInterval(seconds))
