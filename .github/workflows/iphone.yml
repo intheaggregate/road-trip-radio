@@ -1,0 +1,36 @@
+name: Build iPhone app
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: road-trip-radio-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  iphone:
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test song selection and research
+        run: |
+          swift test --parallel
+          python3 -m unittest discover -s Companion -p 'test_*.py' -v
+      - name: Build iPhone package
+        run: bash scripts/package-ios.sh "$RUNNER_TEMP/radio"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RoadTripRadio-iPhone
+          path: ${{ runner.temp }}/radio/RoadTripRadio.ipa
+          if-no-files-found: error
+          retention-days: 7
+      - name: Launch on an iPhone simulator
+        run: bash scripts/smoke-ios.sh "$RUNNER_TEMP/radio"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: iPhone-preview
+          path: ${{ runner.temp }}/radio/Drive.png
+          if-no-files-found: error
+          retention-days: 7

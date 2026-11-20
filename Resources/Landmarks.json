@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "name": "Roadside recordings",
+  "stories": [
+    {
+      "place": "Stax Museum, Memphis",
+      "latitude": 35.11515,
+      "longitude": -90.03185,
+      "title": "Green Onions",
+      "artist": "Booker T. & the M.G.'s",
+      "reason": "The band recorded its organ-led instrumental in the former theater on this block.",
+      "source": "https://staxmuseum.com/stax-museum-and-sam-phillips-recording-announce-new-partnership-today-on-what-would-be-phillips-100th-birthday/"
+    },
+    {
+      "place": "Standin’ on the Corner Park, Winslow",
+      "latitude": 35.02327,
+      "longitude": -110.6972,
+      "title": "Take It Easy",
+      "artist": "Eagles",
+      "reason": "Winslow built this downtown corner park around the town’s appearance in the song.",
+      "source": "https://www.visitwinslow.com/standing-on-the-corner-park/"
+    },
+    {
+      "place": "Abbey Road Studios, London",
+      "latitude": 51.5321,
+      "longitude": -0.1778,
+      "title": "All You Need Is Love",
+      "artist": "The Beatles",
+      "reason": "The Beatles performed this song here for the 1967 Our World satellite broadcast.",
+      "source": "https://www.abbeyroad.com/filming"
+    }
+  ]
+}
