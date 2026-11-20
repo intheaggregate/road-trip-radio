@@ -115,33 +115,40 @@ enum CloudOAuth {
     private func read(_ connection: NWConnection, port: UInt16, state: String, prefix: Data = Data()) {
         let id = ObjectIdentifier(connection)
         connection.receive(minimumIncompleteLength:1,maximumLength:16384) { [weak self] chunk,_,ended,error in
-            guard let self, self.completion != nil else { connection.cancel(); return }
-            let data = prefix + (chunk ?? Data())
-            if error != nil || data.count > 16384 { connection.cancel(); self.connections[id] = nil; return }
-            guard let end = data.range(of:Data([13,10,13,10])) else {
-                if ended { connection.cancel(); self.connections[id] = nil }
-                else { self.read(connection,port:port,state:state,prefix:data) }
-                return
+            MainActor.assumeIsolated {
+                guard let self, self.completion != nil, self.connections[id] != nil else { connection.cancel(); return }
+                let data = prefix + (chunk ?? Data())
+                if error != nil || data.count > 16384 { connection.cancel(); self.connections[id] = nil; return }
+                guard let end = data.range(of:Data([13,10,13,10])) else {
+                    if ended { connection.cancel(); self.connections[id] = nil }
+                    else { self.read(connection,port:port,state:state,prefix:data) }
+                    return
+                }
+                let headers = String(decoding:data[..<end.lowerBound],as:UTF8.self).components(separatedBy:"\r\n")
+                let request = headers.first?.components(separatedBy:" ") ?? []
+                var fields = [String:String]()
+                var accepted = false
+                if request.count == 3, request[0] == "GET", headers.dropFirst().contains(where:{ $0.lowercased() == "host: 127.0.0.1:\(port)" }),
+                   let parts = URLComponents(string:request[1]), parts.host == nil, parts.scheme == nil, parts.path == "/auth/callback" {
+                    let items = parts.queryItems ?? []
+                    for item in items { fields[item.name] = item.value }
+                    accepted = fields["state"] == state && Set(items.map(\.name)).count == items.count
+                }
+                let body = accepted ? "Return to Road Trip Radio." : "Unknown sign-in request."
+                let response = "HTTP/1.1 \(accepted ? "200 OK" : "400 Bad Request")\r\nCache-Control: no-store\r\nContent-Type: text/plain\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n" + body
+                let authorized = accepted ? fields : nil
+                connection.send(content:Data(response.utf8),completion:.contentProcessed { _ in
+                    MainActor.assumeIsolated {
+                        connection.cancel()
+                        guard self.connections.removeValue(forKey:id) != nil else { return }
+                        if let authorized { self.finish(.success(authorized)) }
+                    }
+                })
             }
-            let headers = String(decoding:data[..<end.lowerBound],as:UTF8.self).components(separatedBy:"\r\n")
-            let request = headers.first?.components(separatedBy:" ") ?? []
-            var fields = [String:String]()
-            var accepted = false
-            if request.count == 3, request[0] == "GET", headers.dropFirst().contains(where:{ $0.lowercased() == "host: 127.0.0.1:\(port)" }),
-               let parts = URLComponents(string:request[1]), parts.host == nil, parts.scheme == nil, parts.path == "/auth/callback" {
-                let items = parts.queryItems ?? []
-                for item in items { fields[item.name] = item.value }
-                accepted = fields["state"] == state && Set(items.map(\.name)).count == items.count
-            }
-            let body = accepted ? "Return to Road Trip Radio." : "Unknown sign-in request."
-            let response = "HTTP/1.1 \(accepted ? "200 OK" : "400 Bad Request")\r\nCache-Control: no-store\r\nContent-Type: text/plain\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n" + body
-            connection.send(content:Data(response.utf8),completion:.contentProcessed { _ in
-                connection.cancel(); self.connections[id] = nil
-                if accepted { self.finish(.success(fields)) }
-            })
         }
     }
-    func authorize(previous: CloudRegistration?, hint: String?, present: @escaping (URL?)->Void) async throws -> (CloudRegistration,CloudTokens) {
+    func authorize(previous: CloudRegistration?, hint: String?, requestConsent: Bool = false,
+                   present: @escaping (URL?)->Void) async throws -> (CloudRegistration,CloudTokens) {
         let state = try randomSecret(), nonce = try randomSecret(), verifier = try randomSecret()
         let hostKey = "chatgpt.host"
         let host: String
@@ -155,26 +162,31 @@ enum CloudOAuth {
         let fields: [String:String] = try await withCheckedThrowingContinuation { continuation in
             completion = continuation
             socket.stateUpdateHandler = { [weak self] status in
-                guard let self, self.completion != nil else { return }
-                switch status {
-                case .ready:
-                    guard let port = socket.port else { self.finish(.failure(RadioError("Could not receive sign-in."))); return }
-                    redirect = "http://127.0.0.1:\(port.rawValue)/auth/callback"
-                    var query = ["client_id":previous?.client ?? "dynamic_agent_client","ext_agent_host_id":host,"response_type":"code",
-                                 "redirect_uri":redirect,"scope":"openid profile email offline_access resource.invoke chatgpt.tokens.use.direct",
-                                 "resource":inferenceResource,"state":state,"nonce":nonce,"code_challenge_method":"S256",
-                                 "code_challenge":base64URL(Data(SHA256.hash(data:Data(verifier.utf8))))]
-                    if previous == nil { query["agent_name_hint"] = "Road Trip Radio" } else { query["id_token_hint"] = hint }
-                    do { present(try Network.url(issuer + "/api/accounts/authorize",query)) }
-                    catch { self.finish(.failure(error)) }
-                case .failed(let error): self.finish(.failure(error))
-                default: break
+                MainActor.assumeIsolated {
+                    guard let self, self.listener === socket, self.completion != nil else { return }
+                    switch status {
+                    case .ready:
+                        guard let port = socket.port else { self.finish(.failure(RadioError("Could not receive sign-in."))); return }
+                        redirect = "http://127.0.0.1:\(port.rawValue)/auth/callback"
+                        var query = ["client_id":previous?.client ?? "dynamic_agent_client","ext_agent_host_id":host,"response_type":"code",
+                                     "redirect_uri":redirect,"scope":"openid profile email offline_access resource.invoke chatgpt.tokens.use.direct",
+                                     "resource":inferenceResource,"state":state,"nonce":nonce,"code_challenge_method":"S256",
+                                     "code_challenge":base64URL(Data(SHA256.hash(data:Data(verifier.utf8))))]
+                        if previous == nil { query["agent_name_hint"] = "Road Trip Radio" } else { query["id_token_hint"] = hint }
+                        if previous != nil && requestConsent { query["prompt"] = "consent" }
+                        do { present(try Network.url(issuer + "/api/accounts/authorize",query)) }
+                        catch { self.finish(.failure(error)) }
+                    case .failed(let error): self.finish(.failure(error))
+                    default: break
+                    }
                 }
             }
             socket.newConnectionHandler = { [weak self] connection in
-                guard let self, let port = socket.port, self.connections.count < 12 else { connection.cancel(); return }
-                self.connections[ObjectIdentifier(connection)] = connection
-                connection.start(queue:.main); self.read(connection,port:port.rawValue,state:state)
+                MainActor.assumeIsolated {
+                    guard let self, self.listener === socket, let port = socket.port, self.connections.count < 12 else { connection.cancel(); return }
+                    self.connections[ObjectIdentifier(connection)] = connection
+                    connection.start(queue:.main); self.read(connection,port:port.rawValue,state:state)
+                }
             }
             socket.start(queue:.main)
             timeout = Task {

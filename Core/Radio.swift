@@ -139,10 +139,11 @@ struct Moment {
     var areaRadius: Double? = nil
     var cuePriority: CuePriority? = nil
     var estimatedETA: Double? = nil
+    var returnFromID: String? = nil
 }
 
 enum CuePriority: Int {
-    case regional = 1, bookend, departure, highwayOpening, landmark
+    case regional = 1, bookend, highwayOpening, departure, landmark
 }
 
 enum CueTrigger: String, Codable {
@@ -241,7 +242,7 @@ struct ProgramDrive {
         guard let program else { return }
         for cue in program.cues {
             switch cue.trigger {
-            case .bookend:
+            case .departure, .bookend:
                 if let center = cue.path.first, center.distance(to:context.point) > cue.radius + 8000 {
                     seenOutside.insert(cue.id)
                 }
@@ -305,11 +306,14 @@ struct ProgramDrive {
         guard let origin else { return nil }
         switch cue.trigger {
         case .departure, .bookend:
-            guard let center = cue.path.first, center.distance(to:context.point) <= cue.radius else { return nil }
-            if context.elapsed <= 2700, center.distance(to:origin) <= cue.radius, !seenOutside.contains(cue.id) {
+            guard let center = cue.path.first else { return nil }
+            let inCity = center.distance(to:context.point) <= cue.radius
+            let leaving = !inCity && context.elapsed <= 900 && origin.distance(to:context.point) <= 20000
+            if context.elapsed <= 2700, center.distance(to:origin) <= cue.radius,
+               (inCity && !seenOutside.contains(cue.id)) || leaving {
                 return ("out",cue.trigger == .departure ? .departure : .bookend,0)
             }
-            guard cue.trigger == .bookend, seenOutside.contains(cue.id) else { return nil }
+            guard inCity, cue.trigger == .bookend, seenOutside.contains(cue.id) else { return nil }
             if let destination = context.road?.points.last, destination.distance(to:center) > cue.radius + 5000 { return nil }
             return ("in",.bookend,0)
         case .highwayOpening:
@@ -351,9 +355,26 @@ struct ProgramDrive {
             return cue.tracks.compactMap { track in
                 guard let song = resolved[track.key] else { return nil }
                 let perTrack = match.priority == .regional || match.priority == .bookend ? "|" + track.key : ""
+                let departureID = match.phase == "in" ? "program|\(cue.id)|out" + perTrack : nil
                 return Moment(id:"program|\(cue.id)|\(match.phase)" + perTrack,point:context.point,song:song,
-                              reason:cue.reason,source:nil,personal:false,cuePriority:match.priority,estimatedETA:match.eta)
+                              reason:cue.reason,source:nil,personal:false,cuePriority:match.priority,estimatedETA:match.eta,
+                              returnFromID:departureID)
             }
+        }
+    }
+
+    /// A cached lower-priority song mustn't win solely because a named opener or
+    /// imminent crossing is still being resolved by Spotify at drive start.
+    func waitingForCue(in program: DriveProgram, context: DriveContext, resolved: [String:Song],
+                       remaining: Double, chosenID: String? = nil) -> Bool {
+        let due = program.cues.compactMap { cue -> (DriveCue,CuePriority)? in
+            guard let match = window(cue,program:program,context:context), match.priority != .regional,
+                  match.eta <= remaining + 15 else { return nil }
+            return (cue,match.priority)
+        }
+        let chosenPriority = due.first { cue, _ in chosenID?.hasPrefix("program|\(cue.id)|") == true }?.1.rawValue ?? 0
+        return due.contains { cue, priority in
+            priority.rawValue > chosenPriority && cue.tracks.allSatisfy { resolved[$0.key] == nil }
         }
     }
 
@@ -420,6 +441,13 @@ struct Mix {
     private(set) var recent: [String] = []
     private(set) var familiarSinceDiscovery = 2
 
+    mutating func heardProgramCues(current: String, remaining: Double, moments: [Moment]) {
+        for moment in moments where moment.cuePriority != nil && moment.song.id == current &&
+            (moment.estimatedETA ?? 0) <= remaining {
+            used.insert(moment.id)
+        }
+    }
+
     mutating func record(_ pick: Pick) {
         if let id = pick.momentID { used.insert(id) }
         familiarSinceDiscovery = pick.momentID == nil ? familiarSinceDiscovery + 1 : 0
@@ -429,8 +457,9 @@ struct Mix {
 
     func choose(context: DriveContext, current: String, remaining: Double, moments: [Moment], favorites: [Favorite], roadSongs: [Favorite] = []) -> Pick? {
         let possible = moments.compactMap { moment -> (Moment, Double)? in
+            let returningToBookend = moment.returnFromID.map { used.contains($0) } ?? false
             guard moment.song.id != current, !used.contains(moment.id),
-                  moment.personal || !recent.contains(moment.song.id) else { return nil }
+                  moment.personal || returningToBookend || !recent.contains(moment.song.id) else { return nil }
             let insideArea = moment.areaRadius.map { context.point.distance(to:moment.point) <= $0 } ?? false
             guard let eta = moment.estimatedETA ?? (insideArea ? 0 : context.eta(to:moment.point)), eta <= 1200 else { return nil }
             return (moment, eta)

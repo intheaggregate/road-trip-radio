@@ -12,7 +12,7 @@ struct CompanionConfig: Codable, Equatable {
         return url
     }
 }
-private final class NoRedirect: NSObject, URLSessionTaskDelegate {
+final class NoRedirect: NSObject, URLSessionTaskDelegate {
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) { completionHandler(nil) }
 }
@@ -33,8 +33,8 @@ enum ResearchDesk {
         return (http.statusCode,data)
     }
     static func check(_ config: CompanionConfig) async throws { _ = try await call(config,path:"v1/status") }
-    static func run(_ config: CompanionConfig, places: [String], live: Bool, energy: Energy, weather: String) async throws -> ResearchPack {
-        let (_, data) = try await call(config,path:"v1/research",body:["mode":live ? "live":"trip","places":places,"energy":energy.rawValue,"weather":weather])
+    static func researchTrip(_ config: CompanionConfig, places: [String], energy: Energy) async throws -> ResearchPack {
+        let (_, data) = try await call(config,path:"v1/research",body:["mode":"trip","places":places,"energy":energy.rawValue,"weather":"Unknown"])
         guard let job = (try JSONSerialization.jsonObject(with:data) as? Object)?["id"] as? String,
               job.range(of:"^[A-Za-z0-9_-]{24}$",options:.regularExpression) != nil else { throw RadioError("Invalid research job.") }
         for _ in 0..<90 {

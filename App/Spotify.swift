@@ -223,10 +223,11 @@ final class Spotify: NSObject, ASWebAuthenticationPresentationContextProviding {
             text.folding(options:[.diacriticInsensitive,.caseInsensitive],locale:Locale(identifier:"en_US_POSIX"))
                 .components(separatedBy:CharacterSet.alphanumerics.inverted).joined()
         }
-        return raw.first { song in
-            let title = song.title.components(separatedBy:" - ").first ?? song.title
-            return (normal(song.title) == normal(requestedTitle) || normal(title) == normal(requestedTitle)) && normal(song.artist) == normal(artist)
-        }
+        let title = normal(requestedTitle), performer = normal(artist)
+        let recordings = raw.filter { normal($0.artist) == performer }
+        if let original = recordings.first(where:{ normal($0.title) == title }) { return original }
+        let variants = recordings.filter { normal($0.title.components(separatedBy:" - ").first ?? $0.title) == title }
+        return variants.first(where:{ $0.title.localizedCaseInsensitiveContains("remaster") }) ?? variants.first
     }
     func lists() async throws -> [LibraryList] {
         let me = try await call("me")

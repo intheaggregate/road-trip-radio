@@ -253,7 +253,7 @@ private struct PlacesScreen: View {
             Section("Trip research") {
                 Button { file = true } label:{ Label("Import trip file",systemImage:"square.and.arrow.down") }
                 if station.companion.paired {
-                    Button { research = true } label:{ Label("Research a drive on my PC",systemImage:"desktopcomputer") }.disabled(station.researchBusy)
+                    Button { research = true } label:{ Label("Research a drive on my PC",systemImage:"desktopcomputer") }.disabled(station.researchBusy || station.driving || station.starting)
                 }
                 if !station.researchStatus.isEmpty { Text(station.researchStatus).font(.footnote) }
                 ForEach(station.savedStories) { story in
@@ -291,7 +291,7 @@ private struct ResearchEditor: View {
             Button("Research with my ChatGPT allowance") {
                 let places = names.components(separatedBy:.newlines).map { $0.trimmingCharacters(in:.whitespacesAndNewlines) }.filter { !$0.isEmpty }
                 guard (1...6).contains(places.count) else { station.notice = "Enter one to six places."; return }
-                Task { await station.researchTrip(places) }; dismiss()
+                station.researchTrip(places); dismiss()
             }.disabled(names.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty)
         }.navigationTitle("Trip research").toolbar { Button("Close") { dismiss() } }
         .onAppear { names = [station.place,station.route?.name ?? ""].filter { !$0.isEmpty }.joined(separator:"\n") } }
@@ -401,10 +401,10 @@ private struct SettingsScreen: View {
                     Button(station.busy ? "Connecting…" : "Connect Spotify") { Task { await station.connect(client.trimmingCharacters(in:.whitespacesAndNewlines)) } }.disabled(station.busy || client.isEmpty)
                 }
             }
+            CloudRadioSettings(cloud:station.cloud)
             Section {
                 if station.companion.paired {
                     Label("PC paired",systemImage:"checkmark.circle"); Text(station.companion.address).font(.footnote)
-                    Toggle("Live picks during drives",isOn:Binding(get:{station.live},set:{station.live = $0}))
                     Button("Unpair PC") { station.unpair(); key = "" }
                 } else {
                     TextField("Private HTTPS address",text:$address).keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
@@ -412,10 +412,10 @@ private struct SettingsScreen: View {
                     Button(checking ? "Checking…" : "Pair Windows PC") {
                         checking = true
                         Task { await station.pair(CompanionConfig(address:address,key:key)); checking = false }
-                    }.disabled(checking || address.isEmpty || key.isEmpty)
+                    }.disabled(checking || address.isEmpty || key.isEmpty || station.driving || station.starting)
                 }
-            } header: { Text("Optional ChatGPT research") }
-              footer: { Text("Your PC uses its signed-in Codex allowance. Live picks send the town, weather, and energy up to once every 20 minutes. You can also import a trip file in Places.") }
+            } header: { Text("Optional pre-trip research on Windows") }
+              footer: { Text("Prepare a drive with your PC before departure, or import a trip file in Places. Your PC can stay off during drives.") }
             Section("Sources") {
                 Link("MusicBrainz",destination:URL(string:"https://musicbrainz.org")!)
                 Link("Weather by Open-Meteo · CC BY 4.0",destination:URL(string:"https://open-meteo.com/")!)

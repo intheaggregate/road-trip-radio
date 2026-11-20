@@ -45,6 +45,10 @@ final class ProgramTests: XCTestCase {
         let entries = picks(drive,pack,returning)
         XCTAssertEqual(entries.map(\.song.id),["theme"])
         XCTAssertNotEqual(entries.first?.id,theme.momentID)
+        let arrival = selected(drive,pack,returning,mix:mix)
+        XCTAssertEqual(arrival?.song.id,"theme")
+        mix.record(arrival!)
+        XCTAssertNil(selected(drive,pack,returning,mix:mix))
         var passingThrough = returning
         passingThrough.road = Road(points:[point(3000),point(-70000)],duration:3000)
         XCTAssertTrue(picks(drive,pack,passingThrough).isEmpty)
@@ -68,6 +72,30 @@ final class ProgramTests: XCTestCase {
         var roadsideStart = ProgramDrive()
         for state in [scene(40000,0,speed:2),scene(40200,20),scene(40500,35)] { roadsideStart.observe(state,program:pack) }
         XCTAssertTrue(picks(roadsideStart,pack,scene(40500,35)).isEmpty)
+    }
+
+    func testAlreadyPlayingTrackFinishesBeforeDepartureThenHighwayThenBookend() {
+        let pack = program(cue("opening",.departure,[point(0)],2000),cue("city",.bookend,[point(0)],2000),
+                           cue("highway",.highwayOpening,[],0))
+        var drive = ProgramDrive(), mix = Mix()
+        drive.observe(scene(1900,0,speed:0),program:pack)
+        drive.observe(scene(2100,15),program:pack)
+        let highway = scene(2400,30)
+        drive.observe(highway,program:pack)
+        let moments = picks(drive,pack,highway)
+        let bookend = moments.first { $0.song.id == "city" }!
+        let cached = [pack.cues[1].tracks[0].key:bookend.song]
+        XCTAssertTrue(drive.waitingForCue(in:pack,context:highway,resolved:cached,remaining:35,chosenID:bookend.id))
+        let first = selected(drive,pack,highway,mix:mix)!
+        XCTAssertEqual(first.song.id,"opening")
+        mix.record(first)
+        let second = selected(drive,pack,highway,mix:mix)!
+        XCTAssertEqual(second.song.id,"highway")
+        mix.record(second)
+        XCTAssertEqual(selected(drive,pack,highway,mix:mix)?.song.id,"city")
+        var alreadyPlaying = Mix()
+        alreadyPlaying.heardProgramCues(current:"opening",remaining:35,moments:moments)
+        XCTAssertEqual(selected(drive,pack,highway,mix:alreadyPlaying)?.song.id,"highway")
     }
 
     func testDirectionalApproachUsesCurrentTrackBoundaryAndCanSurviveSkippedFix() {
@@ -117,7 +145,7 @@ final class ProgramTests: XCTestCase {
         }
     }
 
-    func testLongStretchCountsDrivingInThatRegionAndNeverRequiresAComputer() {
+    func testLongStretchExcludesTimeStoppedOrOutsideTheRegion() {
         let pack = program(cue("lift",.longStretch,[point(0),point(80000)],1200,style:"Driving percussion"))
         var drive = ProgramDrive()
         let entering = scene(0,7000)

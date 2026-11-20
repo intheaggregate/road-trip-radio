@@ -22,9 +22,21 @@ The app requests location updates for the duration of the drive, including while
 
 On stretches with few local music credits, a small set of handpicked songs supplies occasional mellow, cruising, or upbeat discoveries. This lets rain or nightfall change the station even if your Liked Songs have no energy labels.
 
-## Optional research with your ChatGPT allowance
+## Route soundtracks
 
-The Windows companion runs the official Codex CLI under your own ChatGPT sign-in. It asks for music connected to named places, checks a supporting passage against each source page, and sends compact song suggestions to the phone. Lookup failures and usage limits leave the normal DJ available. The helper requires Python 3.11+ and the Codex CLI. Check your sign-in with **codex login status**. [Codex non-interactive mode](https://developers.openai.com/codex/noninteractive)
+Choose a soundtrack in **Drive → Soundtrack**, or tap its preview and **Use this soundtrack**. You can preview the songs before connecting Spotify. **Everyday station** returns to the usual rotation. To add a soundtrack from Files, use **Places → Import trip file**. A soundtrack included in a personal kit also appears in Drive on first launch.
+
+The phone can distinguish departing a city, arriving from outside it, entering a highway, and approaching a landmark from a specific direction. It measures time spent driving along a road for long-stretch cues. Starting the DJ while already on the highway skips the opening ritual. Start it before pulling away to include departure songs. The DJ lines each cue up with a natural track boundary. A bridge or skyline cue estimates where you will be when the current song ends. Visibility and Spotify’s existing queue can shift that moment.
+
+## Optional live picks with ChatGPT
+
+In **Settings**, select **Continue with ChatGPT**, approve plan usage, and enable live picks for drives. The iPhone contacts OpenAI directly over Wi-Fi or cellular using your eligible ChatGPT plan. Your PC can be off. The phone sends the approximate town, weather, energy and, where enabled, the regional musical style. Spotify account information and exact GPS coordinates stay on the phone during this request. Spotify receives track searches and playback commands separately. [Sign in with ChatGPT](https://developers.openai.com/siwc/quickstart)
+
+The station can request additional songs at most once every 20 minutes. It matches a suggestion against Spotify by track title and artist before considering it for the queue. Personal pins and timed soundtrack cues take priority. If the connection or your plan allowance runs out, the phone keeps the saved soundtrack available. New Spotify queue commands need internet access. Spotify can play downloaded music during coverage gaps. [Spotify offline listening](https://support.spotify.com/article/listen-offline/)
+
+## Optional pre-trip research on Windows
+
+The Windows companion runs the official Codex CLI under your own ChatGPT sign-in. It asks for music connected to named places and checks a supporting passage against each source page. The helper requires Python 3.11+ and the Codex CLI. Check your sign-in with **codex login status**. [Codex non-interactive mode](https://developers.openai.com/codex/noninteractive)
 
 **Prepare a trip before departure.** From the project folder on Windows, run the following command and share the resulting JSON file to your iPhone. Open **Places → Import trip file**. The phone stores the suggestions for use along the route.
 
@@ -34,7 +46,7 @@ The Windows kit includes **Memphis-to-Muscle-Shoals.roadtrip.json** with five so
 python Companion/research.py pack --place "Winslow, Arizona" --place "Flagstaff, Arizona" --output route.roadtrip.json
 ~~~
 
-**Request occasional live picks.** Start the companion on your Windows PC. It prints a temporary pairing code. In a second terminal, share its loopback endpoint privately with the iPhone. One option is Tailscale Serve, with both devices signed into the same personal tailnet. [Tailscale Serve](https://tailscale.com/docs/features/tailscale-serve)
+**Start pre-trip research from your phone.** You can optionally pair the companion at home. Start it on your Windows PC and copy the temporary pairing code. In a second terminal, share its loopback address privately with your iPhone. One option is Tailscale Serve, with both devices signed into the same personal tailnet. [Tailscale Serve](https://tailscale.com/docs/features/tailscale-serve)
 
 ~~~powershell
 python Companion/research.py serve
@@ -44,7 +56,7 @@ python Companion/research.py serve
 tailscale serve --bg 8743
 ~~~
 
-Enter the private HTTPS origin printed by Tailscale and the companion’s pairing code under **Settings → Optional ChatGPT research**. Enable **Live picks during drives**. Keep the PC awake and the companion running for live requests. A code changes when the companion restarts. The iPhone uses only the paired service and sends a town, energy, and weather category. Pre-trip requests send the place names you enter. The companion sends these inputs to Codex, accepts one research job at a time, and limits live requests to once every 20 minutes. The phone resolves results against Spotify after research. Spotify listening data, song pins, credentials, and precise GPS coordinates stay out of these model requests.
+Enter the private HTTPS origin and pairing code in Settings, then open **Places → Research a drive on my PC**. When research finishes, the phone stores the suggestions and you can turn off your PC.
 
 ## Build and verify
 

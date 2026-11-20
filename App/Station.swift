@@ -15,7 +15,6 @@ private struct Preferences: Codable {
     var likes = true
     var energy = Energy.automatic
     var device = ""
-    var live = false
     var stories: [Story] = []
     var selectedProgramName: String?
 }
@@ -28,6 +27,7 @@ struct AirLog: Identifiable {
 final class Station: ObservableObject {
     let spotify = Spotify()
     let gps = TripGPS()
+    let cloud = CloudRadio()
     private let music = MusicMap()
     private let prefKey = "radio.preferences.v1"
     @Published private var prefs: Preferences
@@ -75,7 +75,9 @@ final class Station: ObservableObject {
     private var liveTask: Task<Void,Never>?, routeTask: Task<Void,Never>?
     private var lastPoll = Date.distantPast, lastArea = Date.distantPast, lastRoute = Date.distantPast
     private var lastContextPoint: Point?, weatherPoint: Point?, weatherAt = Date.distantPast
-    private var liveAt = Date.distantPast, lastLiveTown = "", catalogAt = Date.distantPast
+    private var catalogAt = Date.distantPast
+    private var cloudSet: (scene:CloudDriveScene, songs:[RoadSong], time:Date)?
+    private var pcTask: Task<Void,Never>?
     private var town: Town?
     private var blockedUntil = Date.distantPast
     private var pollAfter = Date.distantPast
@@ -99,13 +101,15 @@ final class Station: ObservableObject {
         connected = spotify.connected
         gps.onFix = { [weak self] location in self?.receive(location) }
         gps.onIssue = { [weak self] message in self?.notice = message }
+        cloud.onChange = { [weak self] in
+            self?.liveTask?.cancel(); self?.liveTask = nil; self?.cloudSet = nil
+        }
     }
     var pins: [Pin] { prefs.pins }
     var rotations: [Rotation] { prefs.rotations }
     var energy: Energy { get { prefs.energy } set { prefs.energy = newValue; save() } }
     var likes: Bool { get { prefs.likes } set { prefs.likes = newValue; save(); reloadLibrary() } }
     var device: String { get { prefs.device } set { prefs.device = newValue; save() } }
-    var live: Bool { get { prefs.live } set { prefs.live = newValue; save(); if !newValue { liveTask?.cancel() } } }
     var savedStories: [Story] { prefs.stories }
     var drivePrograms: [DriveProgram] {
         var programs = importedPrograms
@@ -252,6 +256,7 @@ final class Station: ObservableObject {
             activeDevice = choice.id; playerName = choice.name; driving = true; starting = false
             startTime = Date(); mix = Mix(); gate = QueueGate(); heldQueueOrigin = nil; current = nil; next = nil; log = []
             programDrive = ProgramDrive()
+            cancelTripResearch()
             status = "Listening on \(choice.name)"; blockedUntil = .distantPast; lastPoll = .distantPast
             pollAfter = .distantPast; consecutiveErrors = 0
             gps.start(); reloadLibrary(); pulse()
@@ -268,7 +273,7 @@ final class Station: ObservableObject {
         marker = UUID(); driving = false; starting = false; gps.stop()
         for task in [tickTask,clockTask,contextTask,discoveryTask,lookupTask,libraryTask,liveTask,routeTask] { task?.cancel() }
         tickTask = nil; clockTask = nil; contextTask = nil; discoveryTask = nil; lookupTask = nil
-        libraryTask = nil; liveTask = nil; routeTask = nil
+        libraryTask = nil; liveTask = nil; routeTask = nil; cloudSet = nil
         status = "Drive ended"; next = nil; current = nil; activeDevice = ""; heldQueueOrigin = nil; routeDeviations = 0
     }
     private func receive(_ location: CLLocation) {
@@ -289,7 +294,8 @@ final class Station: ObservableObject {
                     guard marker == token else { return }
                     if let weather { conditions = weather; weatherPoint = p; weatherAt = Date() }
                 }
-                discover(p, town:found); requestLiveIfDue()
+                discover(p, town:found)
+                if let fix { requestLiveIfDue(fix) }
             }
         }
         if let route, Date().timeIntervalSince(lastRoute) > 50, !routeBusy {
@@ -321,7 +327,9 @@ final class Station: ObservableObject {
         let nearby = allStories.filter { $0.point.distance(to:p) < 30000 && resolved[$0.id] == nil && (lookupAfter[$0.id] ?? .distantPast) <= Date() }
             .sorted { $0.point.distance(to:p) < $1.point.distance(to:p) }
         let target = drive?.energy ?? .cruise
-        let music = RoadSong.selections.filter { $0.energy == target && resolved[$0.key] == nil && (lookupAfter[$0.key] ?? .distantPast) <= Date() }
+        let choices = (drive.map(cloudMusic) ?? []) + RoadSong.selections
+        var knownMusic = Set<String>()
+        let music = choices.filter { $0.energy == target && knownMusic.insert($0.key).inserted && resolved[$0.key] == nil && (lookupAfter[$0.key] ?? .distantPast) <= Date() }
         let lookups = pending.map { (key:$0.key,title:$0.title,artist:$0.artist) } +
             nearby.map { (key:$0.id,title:$0.title,artist:$0.artist) } +
             music.map { (key:$0.key,title:$0.title,artist:$0.artist) }
@@ -356,7 +364,12 @@ final class Station: ObservableObject {
                             wet:weather?.wet ?? false,daylight:weather?.day ?? (7..<19).contains(localHour))
     }
     func pulse() {
-        guard driving, tickTask == nil, Date() >= max(blockedUntil,pollAfter), Date().timeIntervalSince(lastPoll) >= 7 else { return }
+        guard driving else { return }
+        if let fix, abs(fix.timestamp.timeIntervalSinceNow) < 75 {
+            requestLiveIfDue(fix)
+            resolveNear(Point(fix.coordinate))
+        }
+        guard tickTask == nil, Date() >= max(blockedUntil,pollAfter), Date().timeIntervalSince(lastPoll) >= 7 else { return }
         let token = marker; lastPoll = Date()
         tickTask = Task {
             defer { if marker == token { tickTask = nil } }
@@ -391,16 +404,26 @@ final class Station: ObservableObject {
         let cues = selectedDriveProgram.map {
             programDrive.moments(in:$0,context:drive,resolved:resolved,remaining:state.remaining)
         } ?? []
+        mix.heardProgramCues(current:song.id,remaining:state.remaining,moments:cues)
         let personal = pins.map { Moment(id:$0.id.uuidString,point:$0.point,song:$0.song,reason:$0.note.isEmpty ? "Your pin at \($0.place)." : $0.note,source:nil,personal:true) }
         let nearby = allStories.compactMap { story -> Moment? in
             guard let song = resolved[story.id] else { return nil }
             return Moment(id:story.id,point:story.point,song:song,reason:story.reason,source:URL(string:story.source),personal:false,areaRadius:story.areaRadius)
         }
-        let roadSongs = RoadSong.selections.compactMap { selection in
+        let cloudSongs = cloudMusic(drive)
+        let roadSongs = (cloudSongs + RoadSong.selections).compactMap { selection in
             resolved[selection.key].map { Favorite(song:$0,energy:selection.energy) }
         }
-        guard let pick = mix.choose(context:drive,current:song.id,remaining:state.remaining,moments:personal+cues+nearby,
+        guard var pick = mix.choose(context:drive,current:song.id,remaining:state.remaining,moments:personal+cues+nearby,
                                     favorites:favorites,roadSongs:roadSongs) else { return }
+        if !pick.personal, state.remaining > 18, lookupTask != nil, let program = selectedDriveProgram,
+           programDrive.waitingForCue(in:program,context:drive,resolved:resolved,remaining:state.remaining,chosenID:pick.momentID) {
+            pollAfter = Date().addingTimeInterval(7)
+            return
+        }
+        if pick.momentID == "energy|" + pick.song.id, cloudSongs.contains(where:{ resolved[$0.key]?.id == pick.song.id }) {
+            pick.reason += " Suggested by ChatGPT for this stretch."
+        }
         gate.reserve(pick,from:song.id,now:Date()); heldQueueOrigin = song.id
         do { try await spotify.enqueue(pick.song,device:activeDevice) }
         catch {
@@ -414,6 +437,7 @@ final class Station: ObservableObject {
         if log.count > 60 { log.removeLast() }
     }
     func pair(_ config: CompanionConfig) async {
+        guard !driving, !starting else { return }
         do {
             try await ResearchDesk.check(config)
             try Vault.save(JSONEncoder().encode(config),key:"companion")
@@ -421,7 +445,7 @@ final class Station: ObservableObject {
         } catch { notice = error.localizedDescription }
     }
     func unpair() {
-        live = false; companion = CompanionConfig(); try? Vault.save(nil,key:"companion"); researchStatus = ""
+        cancelTripResearch(); companion = CompanionConfig(); try? Vault.save(nil,key:"companion"); researchStatus = ""
     }
     func merge(_ pack: ResearchPack) {
         var known = Set((seed + prefs.stories).map(\.id))
@@ -452,30 +476,50 @@ final class Station: ObservableObject {
             }
         } catch { notice = error.localizedDescription }
     }
-    func researchTrip(_ places: [String]) async {
-        guard !researchBusy else { return }
+    func researchTrip(_ places: [String]) {
+        guard !researchBusy, !driving, !starting else { return }
         researchBusy = true; researchStatus = "Researching places on your PC…"
-        defer { researchBusy = false }
-        do {
-            let config = companion
-            let pack = try await ResearchDesk.run(config,places:places,live:false,energy:energy,weather:"Unknown")
-            if config == companion { merge(pack) }
-        } catch { researchStatus = error.localizedDescription }
-    }
-    private func requestLiveIfDue() {
-        guard live, companion.paired, liveTask == nil, let town, Date().timeIntervalSince(liveAt) >= 1200 else { return }
-        let liveKey = [town.label,energy.rawValue,conditions?.label ?? "Unknown"].joined(separator:"|")
-        guard lastLiveTown != liveKey else { return }
-        let token = marker, config = companion, name = town.label
-        liveAt = Date()
-        liveTask = Task {
-            defer { if marker == token { liveTask = nil } }
+        let config = companion
+        pcTask = Task {
+            defer { if !Task.isCancelled { researchBusy = false; pcTask = nil } }
             do {
-                let pack = try await ResearchDesk.run(config,places:[name],live:true,energy:energy,weather:conditions?.label ?? "Unknown")
-                guard !Task.isCancelled, marker == token, live, config == companion, self.town?.label == name else { return }
-                let nearby = pack.stories.filter { town.point.distance(to:$0.point) <= 35000 }
-                merge(ResearchPack(version:1,name:pack.name,stories:nearby)); lastLiveTown = liveKey
-            } catch { if marker == token { researchStatus = "Live research unavailable · \(error.localizedDescription)" } }
+                let pack = try await ResearchDesk.researchTrip(config,places:places,energy:energy)
+                if !Task.isCancelled, config == companion { merge(pack) }
+            } catch { if !Task.isCancelled { researchStatus = error.localizedDescription } }
+        }
+    }
+    private func cancelTripResearch() {
+        if pcTask != nil { pcTask?.cancel(); pcTask = nil; researchBusy = false; researchStatus = "" }
+    }
+    private func cloudScene(_ drive: DriveContext) -> CloudDriveScene {
+        let area = town.flatMap { $0.point.distance(to:drive.point) < 18000 ? $0.label : nil } ?? ""
+        let nearby = weatherPoint.map { $0.distance(to:drive.point) < 50000 } ?? false
+        let weather = nearby && Date().timeIntervalSince(weatherAt) < 3600 ? conditions?.label : nil
+        return CloudDriveScene(town:area,weather:weather ?? "Unknown",energy:drive.energy.rawValue,
+                              daylight:drive.daylight,style:liveMusicStyle(drive))
+    }
+    private func cloudMusic(_ drive: DriveContext) -> [RoadSong] {
+        guard let set = cloudSet, cloud.enabled, Date().timeIntervalSince(set.time) < 1800 else { return [] }
+        let scene = cloudScene(drive)
+        guard scene.energy == set.scene.energy, scene.style == set.scene.style,
+              scene.weather == set.scene.weather, scene.daylight == set.scene.daylight else { return [] }
+        return set.songs
+    }
+    private func requestLiveIfDue(_ location: CLLocation) {
+        guard driving, cloud.canRequest, liveTask == nil, abs(location.timestamp.timeIntervalSinceNow) < 75 else { return }
+        let drive = context(location), token = marker
+        let scene = cloudScene(drive)
+        if scene.town.isEmpty && Date().timeIntervalSince(startTime) < 15 { return }
+        liveTask = Task {
+            defer { if marker == token && !Task.isCancelled { liveTask = nil } }
+            do {
+                let tracks = try await cloud.suggest(scene)
+                guard !Task.isCancelled, marker == token, cloud.enabled, let fix,
+                      cloudScene(context(fix)) == scene else { return }
+                let songs = tracks.map { RoadSong(title:$0.title,artist:$0.artist,energy:drive.energy) }
+                cloudSet = (scene,songs,Date())
+                resolveNear(Point(fix.coordinate))
+            } catch { /* CloudRadio exposes account and usage errors in Settings. */ }
         }
     }
 }
