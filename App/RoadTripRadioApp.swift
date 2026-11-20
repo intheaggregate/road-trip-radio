@@ -90,6 +90,8 @@ private struct DriveScreen: View {
                         }.frame(height:160).clipShape(RoundedRectangle(cornerRadius:12))
                         Text("\(route.name) · \(distance(route.road.length)) · \(duration(route.road.duration))").font(.subheadline)
                         let highlights = station.highlights
+                        if station.lookingAlongRoute { HStack { ProgressView(); Text("Finding music along the route…").font(.footnote) } }
+                        else if highlights.isEmpty { Text("Local picks will update as you drive. You can also add a song pin for this route.").font(.footnote) }
                         ForEach(highlights.indices,id:\.self) { i in
                             Label("\(highlights[i].0) · \(highlights[i].1)",systemImage:"music.note").font(.subheadline)
                         }
@@ -155,7 +157,8 @@ struct PlaceSearch: View {
     let near: Point?
     let pick: (MKMapItem)->Void
     @Environment(\.dismiss) private var dismiss
-    @State private var query = "", message = ""
+    @State private var query = ""
+    @State private var message = ""
     @State private var found: [MKMapItem] = []
     @State private var searching = false
     private func search() async {
@@ -187,7 +190,9 @@ struct PlaceSearch: View {
 
 private struct PlacesScreen: View {
     @EnvironmentObject var station: Station
-    @State private var addPin = false, file = false, research = false
+    @State private var addPin = false
+    @State private var file = false
+    @State private var research = false
     var body: some View {
         List {
             Section("My song pins") {
@@ -249,9 +254,14 @@ private struct ResearchEditor: View {
 private struct PinEditor: View {
     @EnvironmentObject var station: Station
     @Environment(\.dismiss) private var dismiss
-    @State private var point: Point?, place = "", note = "", query = "", message = ""
+    @State private var point: Point?
+    @State private var place = ""
+    @State private var note = ""
+    @State private var query = ""
+    @State private var message = ""
     @State private var position: MapCameraPosition = .automatic
-    @State private var places = false, searching = false
+    @State private var places = false
+    @State private var searching = false
     @State private var songs: [Song] = []
     @State private var selected: Song?
     func center(_ p: Point) { position = .region(MKCoordinateRegion(center:p.coordinate,latitudinalMeters:2400,longitudinalMeters:2400)) }
@@ -320,7 +330,11 @@ private struct RotationScreen: View {
 }
 private struct SettingsScreen: View {
     @EnvironmentObject var station: Station
-    @State private var client = "", address = "", key = "", confirming = false, checking = false
+    @State private var client = ""
+    @State private var address = ""
+    @State private var key = ""
+    @State private var confirming = false
+    @State private var checking = false
     var body: some View {
         Form {
             Section("Spotify Premium") {

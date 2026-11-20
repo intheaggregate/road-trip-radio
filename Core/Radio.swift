@@ -81,11 +81,13 @@ struct Story: Codable, Hashable, Identifiable {
     var artist: String
     var reason: String
     var source: String
+    var areaRadius: Double? = nil
     var point: Point { Point(latitude: latitude, longitude: longitude) }
     var id: String { "\(place)|\(artist)|\(title)|\(latitude)|\(longitude)" }
     var valid: Bool {
         guard let link = URL(string: source), link.scheme == "https",
-              let host = link.host, !host.isEmpty, point.valid else { return false }
+              let host = link.host, !host.isEmpty, point.valid,
+              areaRadius.map({ (0...15000).contains($0) }) ?? true else { return false }
         return [place, title, artist, reason].allSatisfy { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.count <= 600 }
     }
 }
@@ -119,6 +121,7 @@ struct Moment {
     let reason: String
     let source: URL?
     let personal: Bool
+    var areaRadius: Double? = nil
 }
 
 struct DriveContext {
@@ -186,8 +189,9 @@ struct Mix {
     func choose(context: DriveContext, current: String, remaining: Double, moments: [Moment], favorites: [Favorite]) -> Pick? {
         let possible = moments.compactMap { moment -> (Moment, Double)? in
             guard moment.song.id != current, !used.contains(moment.id),
-                  moment.personal || !recent.contains(moment.song.id),
-                  let eta = context.eta(to: moment.point), eta <= 1200 else { return nil }
+                  moment.personal || !recent.contains(moment.song.id) else { return nil }
+            let insideArea = moment.areaRadius.map { context.point.distance(to:moment.point) <= $0 } ?? false
+            guard let eta = insideArea ? 0 : context.eta(to:moment.point), eta <= 1200 else { return nil }
             return (moment, eta)
         }.sorted {
             if $0.0.personal != $1.0.personal { return $0.0.personal }

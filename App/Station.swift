@@ -53,6 +53,9 @@ final class Station: ObservableObject {
     @Published var companion = CompanionConfig()
     private var seed: [Story] = []
     private var localStories: [Story] = []
+    @Published private var routeStories: [Story] = []
+    @Published private(set) var lookingAlongRoute = false
+    private var previewTask: Task<Void,Never>?
     private var resolved: [String:Song] = [:]
     private var lookupAfter: [String:Date] = [:]
     private var favorites: [Favorite] = []
@@ -90,7 +93,10 @@ final class Station: ObservableObject {
     var live: Bool { get { prefs.live } set { prefs.live = newValue; save(); if !newValue { liveTask?.cancel() } } }
     var savedStories: [Story] { prefs.stories }
     var point: Point? { fix.map { Point($0.coordinate) } }
-    var allStories: [Story] { seed + prefs.stories + localStories }
+    var allStories: [Story] {
+        var known = Set<String>()
+        return (seed + prefs.stories + routeStories + localStories).filter { known.insert($0.id).inserted }
+    }
     var highlights: [(String,String)] {
         guard let route else { return [] }
         let records = pins.map { ($0.place,$0.song.title,$0.point) } + allStories.map { ($0.place,$0.title,$0.point) }
@@ -144,16 +150,45 @@ final class Station: ObservableObject {
     }
     func setRoute(_ item: MKMapItem) async {
         let nonce = UUID(); routeMarker = nonce
-        guard let fix else { gps.request(); notice = "Waiting for your location. Choose the destination again after the location appears."; return }
+        previewTask?.cancel(); lookingAlongRoute = false
         routeBusy = true
         defer { if routeMarker == nonce { routeBusy = false } }
         do {
+            if fix.map({ abs($0.timestamp.timeIntervalSinceNow) > 90 }) ?? true {
+                gps.request()
+                for _ in 0..<40 {
+                    guard routeMarker == nonce else { return }
+                    if let fix, abs(fix.timestamp.timeIntervalSinceNow) <= 90 { break }
+                    try await Task.sleep(nanoseconds:250_000_000)
+                }
+            }
+            guard let fix, abs(fix.timestamp.timeIntervalSinceNow) <= 90 else { throw RadioError("A current location is needed to preview the route. Check Location access in iPhone Settings.") }
             let result = try await RoutePlan.make(from:fix,to:item)
             guard routeMarker == nonce else { return }
             route = result; lastRoute = Date(); routeDeviations = 0
+            if !driving { preview(result,token:nonce) }
         } catch { if routeMarker == nonce { notice = error.localizedDescription } }
     }
-    func clearRoute() { routeMarker = UUID(); routeTask?.cancel(); routeTask = nil; routeBusy = false; route = nil }
+    private func preview(_ plan: RoutePlan, token: UUID) {
+        routeStories = []; lookingAlongRoute = true
+        previewTask = Task {
+            defer { if routeMarker == token { lookingAlongRoute = false } }
+            let road = plan.road
+            for fraction in [0.45,1.0] {
+                guard let index = road.distances.firstIndex(where:{ $0 >= road.length * fraction }),
+                      routeMarker == token, !Task.isCancelled else { return }
+                let p = road.points[index]
+                let town = try? await Town.find(CLLocation(latitude:p.latitude,longitude:p.longitude))
+                if let found = try? await music.stories(near:p,town:town), routeMarker == token {
+                    routeStories += found
+                }
+            }
+        }
+    }
+    func clearRoute() {
+        routeMarker = UUID(); previewTask?.cancel(); lookingAlongRoute = false; routeStories = []
+        routeTask?.cancel(); routeTask = nil; routeBusy = false; route = nil
+    }
     func start() async {
         guard !starting, !driving else { return }
         guard connected else { notice = "Connect your Spotify account in Settings first."; return }
@@ -205,7 +240,7 @@ final class Station: ObservableObject {
                 let found = try? await Town.find(location)
                 guard marker == token else { return }
                 town = found; place = found?.name ?? ""
-                if weatherPoint.map({ $0.distance(to:p) > 15000 }) ?? true || Date().timeIntervalSince(weatherAt) > 900 {
+                if (weatherPoint.map({ $0.distance(to:p) > 15000 }) ?? true) || Date().timeIntervalSince(weatherAt) > 900 {
                     let weather = try? await Conditions.load(p)
                     guard marker == token else { return }
                     if let weather { conditions = weather; weatherPoint = p; weatherAt = Date() }
@@ -290,7 +325,7 @@ final class Station: ObservableObject {
         let personal = pins.map { Moment(id:$0.id.uuidString,point:$0.point,song:$0.song,reason:$0.note.isEmpty ? "Your pin at \($0.place)." : $0.note,source:nil,personal:true) }
         let nearby = allStories.compactMap { story -> Moment? in
             guard let song = resolved[story.id] else { return nil }
-            return Moment(id:story.id,point:story.point,song:song,reason:story.reason,source:URL(string:story.source),personal:false)
+            return Moment(id:story.id,point:story.point,song:song,reason:story.reason,source:URL(string:story.source),personal:false,areaRadius:story.areaRadius)
         }
         guard let pick = mix.choose(context:drive,current:song.id,remaining:state.remaining,moments:personal+nearby,favorites:favorites) else { return }
         gate.reserve(pick,from:song.id,now:Date()); heldQueueOrigin = song.id

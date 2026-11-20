@@ -38,6 +38,13 @@ final class RadioTests: XCTestCase {
         XCTAssertNil(drive.eta(to:north(800)))
         XCTAssertEqual(drive.eta(to:north(80)),0)
     }
+    func testArtistFromTownRemainsEligibleAfterPassingItsCenter() {
+        var drive = context(planned:true)
+        drive.point = north(3000)
+        var hometown = cue("local-artist",0,user:false)
+        hometown.areaRadius = 8000
+        XCTAssertEqual(Mix().choose(context:drive,current:"now",remaining:35,moments:[hometown],favorites:[])?.song.id,"local-artist")
+    }
     func testRainNightAndUserOverride() {
         var drive = context()
         drive.wet = true

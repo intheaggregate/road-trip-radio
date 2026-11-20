@@ -39,6 +39,7 @@ final class TripGPS: NSObject, CLLocationManagerDelegate {
     var onFix: ((CLLocation)->Void)?
     var onIssue: ((String)->Void)?
     private(set) var active = false
+    private var requestedFix = false
     override init() {
         super.init()
         manager.delegate = self; manager.activityType = .automotiveNavigation
@@ -46,6 +47,7 @@ final class TripGPS: NSObject, CLLocationManagerDelegate {
         manager.pausesLocationUpdatesAutomatically = false
     }
     func request() {
+        requestedFix = true
         switch manager.authorizationStatus {
         case .notDetermined: manager.requestWhenInUseAuthorization()
         case .authorizedAlways, .authorizedWhenInUse: manager.requestLocation()
@@ -60,14 +62,14 @@ final class TripGPS: NSObject, CLLocationManagerDelegate {
     func stop() { active = false; manager.stopUpdatingLocation(); manager.allowsBackgroundLocationUpdates = false }
     func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
         switch manager.authorizationStatus {
-        case .authorizedAlways, .authorizedWhenInUse: if active { manager.startUpdatingLocation() } else { manager.requestLocation() }
+        case .authorizedAlways, .authorizedWhenInUse: if active { manager.startUpdatingLocation() } else if requestedFix { manager.requestLocation() }
         case .restricted, .denied: stop(); onIssue?("Location access is off. Enable While Using in iPhone Settings.")
         default: break
         }
     }
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
         guard let fix = locations.last, fix.horizontalAccuracy >= 0, fix.horizontalAccuracy <= 650, abs(fix.timestamp.timeIntervalSinceNow) < 90 else { return }
-        onFix?(fix)
+        requestedFix = false; onFix?(fix)
     }
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
         if (error as? CLError)?.code != .locationUnknown { onIssue?(error.localizedDescription) }
@@ -164,7 +166,7 @@ actor MusicMap {
             guard let title = (response["recordings"] as? [Object])?.first?["title"] as? String else { continue }
             let why = type == "Group" ? "\(name) formed in \(town.name)." : "\(name) was born in \(town.name)."
             return Story(place:town.name,latitude:town.point.latitude,longitude:town.point.longitude,title:title,
-                         artist:name,reason:why,source:"https://musicbrainz.org/artist/" + id)
+                         artist:name,reason:why,source:"https://musicbrainz.org/artist/" + id,areaRadius:8000)
         }
         return nil
     }
