@@ -137,6 +137,232 @@ struct Moment {
     let source: URL?
     let personal: Bool
     var areaRadius: Double? = nil
+    var cuePriority: CuePriority? = nil
+    var estimatedETA: Double? = nil
+}
+
+enum CuePriority: Int {
+    case regional = 1, bookend, departure, highwayOpening, landmark
+}
+
+enum CueTrigger: String, Codable {
+    case departure, bookend, approach, highwayOpening, region, longStretch, nearby
+}
+
+struct CueTrack: Codable, Hashable {
+    var title: String
+    var artist: String
+    var key: String { "program|\(artist.lowercased())|\(title.lowercased())" }
+}
+
+struct DriveCue: Codable {
+    let id: String
+    let trigger: CueTrigger
+    let label: String
+    let reason: String
+    let tracks: [CueTrack]
+    let path: [Point]
+    let radius: Double
+    var musicStyle: String? = nil
+
+    func projection(_ point: Point) -> (along: Double, away: Double) {
+        if path.count == 1 { return (0, point.distance(to:path[0])) }
+        return Road(points:path,duration:0).projection(point)
+    }
+}
+
+struct DriveProgram: Codable {
+    let version: Int
+    let name: String
+    let cues: [DriveCue]
+
+    func validated() throws -> DriveProgram {
+        func text(_ value: String, _ limit: Int) -> Bool {
+            !value.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty && value.count <= limit &&
+                value.rangeOfCharacter(from:.controlCharacters) == nil
+        }
+        guard version == 1, text(name,160), (1...60).contains(cues.count),
+              Set(cues.map(\.id)).count == cues.count else { throw RadioError("Choose a version 1 driving program with unique cues.") }
+        for cue in cues {
+            guard text(cue.id,90), text(cue.label,160), text(cue.reason,450),
+                  cue.id.range(of:"^[A-Za-z0-9_-]+$",options:.regularExpression) != nil,
+                  (1...16).contains(cue.tracks.count), cue.tracks.allSatisfy({ text($0.title,160) && text($0.artist,160) }),
+                  cue.path.count <= 150, cue.path.allSatisfy(\.valid), (0...120000).contains(cue.radius),
+                  cue.radius > 0 || (cue.trigger == .highwayOpening && cue.path.isEmpty),
+                  cue.musicStyle.map({ text($0,160) }) ?? true else { throw RadioError("A driving cue has invalid songs, text, or coordinates.") }
+            switch cue.trigger {
+            case .approach:
+                guard cue.path.count >= 2, Road(points:cue.path,duration:0).length > 30 else {
+                    throw RadioError("An approach needs a path ending at its landmark.")
+                }
+            case .departure, .bookend:
+                guard cue.path.count == 1 else { throw RadioError("A trip endpoint needs one center point.") }
+            case .highwayOpening: break
+            case .nearby, .region, .longStretch:
+                guard !cue.path.isEmpty else { throw RadioError("This cue needs a place or a stretch of road.") }
+            }
+        }
+        return self
+    }
+}
+
+/// Evidence comes from this drive's fixes. Starting the app mid-route does not imply
+/// an earlier city departure, highway entry, or long spell of driving.
+struct ProgramDrive {
+    private var origin: Point?
+    private var previous: (point: Point, elapsed: Double)?
+    private var course: Double?
+    private var courseAnchor: Point?
+    private var sawStreetSpeed = false
+    private var fastSince: (point: Point, elapsed: Double)?
+    private var highwayAt: Double?
+    private var seenOutside = Set<String>()
+    private var crossedAt: [String:Double] = [:]
+    private var approaching = Set<String>()
+    private var corridorSeconds: [String:Double] = [:]
+
+    mutating func observe(_ context: DriveContext, program: DriveProgram? = nil) {
+        if origin == nil { origin = context.point }
+        if let previous, context.elapsed < previous.elapsed { return }
+        defer { previous = (context.point,context.elapsed) }
+        if let anchor = courseAnchor, anchor.distance(to:context.point) >= 65 {
+            let offset = anchor.offset(to:context.point)
+            course = atan2(offset.east,offset.north) * 180 / .pi
+            courseAnchor = context.point
+        } else if courseAnchor == nil { courseAnchor = context.point }
+        if context.speed < 12 { sawStreetSpeed = true }
+        if context.speed >= 19, sawStreetSpeed {
+            if let start = fastSince {
+                if highwayAt == nil, context.elapsed - start.elapsed >= 7,
+                   start.point.distance(to:context.point) >= 130 { highwayAt = context.elapsed }
+            } else { fastSince = (context.point,context.elapsed) }
+        } else { fastSince = nil }
+
+        guard let program else { return }
+        for cue in program.cues {
+            switch cue.trigger {
+            case .bookend:
+                if let center = cue.path.first, center.distance(to:context.point) > cue.radius + 8000 {
+                    seenOutside.insert(cue.id)
+                }
+            case .approach:
+                guard crossedAt[cue.id] == nil, let end = cue.path.last else { continue }
+                let onApproach = approachETA(cue,context:context) != nil
+                if onApproach && end.distance(to:context.point) <= cue.radius {
+                    crossedAt[cue.id] = context.elapsed
+                } else if approaching.contains(cue.id), let previous, context.elapsed - previous.elapsed <= 90 {
+                    let movement = Road(points:[previous.point,context.point],duration:0)
+                    let pass = movement.projection(end)
+                    if movement.length < 4000, pass.away <= cue.radius, pass.along > 0, pass.along < movement.length {
+                        crossedAt[cue.id] = context.elapsed
+                    }
+                }
+                if onApproach { approaching.insert(cue.id) } else { approaching.remove(cue.id) }
+            case .longStretch:
+                if cue.projection(context.point).away > cue.radius { corridorSeconds[cue.id] = nil; continue }
+                let alreadyInside = corridorSeconds[cue.id] != nil
+                if corridorSeconds[cue.id] == nil { corridorSeconds[cue.id] = 0 }
+                if alreadyInside, let previous, context.speed >= 4, previous.point.distance(to:context.point) > 20 {
+                    let dt = context.elapsed - previous.elapsed
+                    if (0...180).contains(dt) { corridorSeconds[cue.id,default:0] += dt }
+                }
+            default: break
+            }
+        }
+    }
+
+    /// Follow the ordered approach line, so a parallel highway or the reverse crossing
+    /// cannot use this cue. Use local road direction even when no destination is set.
+    private func approachETA(_ cue: DriveCue, context: DriveContext) -> Double? {
+        guard context.speed >= 2, let heading = context.heading ?? course else { return nil }
+        let road = Road(points:cue.path,duration:0)
+        let here = road.projection(context.point)
+        guard here.away <= cue.radius, road.length > 0 else { return nil }
+        let index = road.distances.indices.dropFirst().first { road.distances[$0] >= here.along } ?? (cue.path.count - 1)
+        guard index > 0 else { return nil }
+        let segment = cue.path[index-1].offset(to:cue.path[index])
+        let direction = atan2(segment.east,segment.north)
+        guard cos(heading * .pi / 180 - direction) > 0.55 else { return nil }
+        if let navigation = context.road, let target = cue.path.last {
+            let position = navigation.projection(context.point)
+            if position.away <= 600 {
+                let crossing = navigation.projection(target)
+                guard crossing.away <= max(200,cue.radius), crossing.along >= position.along - cue.radius else { return nil }
+            }
+        }
+        return max(0,road.length - here.along) / min(45,max(6,context.speed))
+    }
+
+    private func opening(_ context: DriveContext, program: DriveProgram) -> Bool {
+        guard context.elapsed <= 5400, let origin, origin.distance(to:context.point) <= 95000 else { return false }
+        return program.cues.contains { cue in
+            (cue.trigger == .bookend || cue.trigger == .departure) && cue.path.first.map { origin.distance(to:$0) <= cue.radius } == true
+        }
+    }
+
+    private typealias Window = (phase: String, priority: CuePriority, eta: Double)
+    private func window(_ cue: DriveCue, program: DriveProgram, context: DriveContext) -> Window? {
+        guard let origin else { return nil }
+        switch cue.trigger {
+        case .departure, .bookend:
+            guard let center = cue.path.first, center.distance(to:context.point) <= cue.radius else { return nil }
+            if context.elapsed <= 2700, center.distance(to:origin) <= cue.radius, !seenOutside.contains(cue.id) {
+                return ("out",cue.trigger == .departure ? .departure : .bookend,0)
+            }
+            guard cue.trigger == .bookend, seenOutside.contains(cue.id) else { return nil }
+            if let destination = context.road?.points.last, destination.distance(to:center) > cue.radius + 5000 { return nil }
+            return ("in",.bookend,0)
+        case .highwayOpening:
+            guard opening(context,program:program), let highwayAt, context.elapsed - highwayAt <= 480,
+                  cue.path.isEmpty || cue.projection(context.point).away <= cue.radius else { return nil }
+            return ("entry",.highwayOpening,0)
+        case .approach:
+            if let crossed = crossedAt[cue.id] {
+                guard context.elapsed - crossed <= 240, let target = cue.path.last, context.point.distance(to:target) < 8500 else { return nil }
+                return ("crossing",.landmark,0)
+            }
+            guard let eta = approachETA(cue,context:context), eta <= 1200 else { return nil }
+            return ("crossing",.landmark,eta)
+        case .region, .nearby, .longStretch:
+            guard cue.projection(context.point).away <= cue.radius else { return nil }
+            if cue.trigger == .longStretch {
+                let minimum: Double = context.elapsed >= 5400 ? 600 : 1500
+                guard (corridorSeconds[cue.id] ?? 0) >= minimum else { return nil }
+            }
+            return ("area",cue.trigger == .nearby ? .landmark : .regional,0)
+        }
+    }
+
+    func preload(in program: DriveProgram, context: DriveContext) -> [CueTrack] {
+        var seen = Set<String>()
+        let ordered = program.cues.compactMap { cue -> (DriveCue,Int,Double)? in
+            if let match = window(cue,program:program,context:context) { return (cue,-match.priority.rawValue,match.eta) }
+            if cue.trigger == .highwayOpening { return opening(context,program:program) ? (cue,0,0) : nil }
+            let distance = cue.projection(context.point).away - cue.radius
+            return distance <= 25000 ? (cue,1,distance) : nil
+        }.sorted { a,b in a.1 != b.1 ? a.1 < b.1 : a.2 < b.2 }
+        return ordered.flatMap { $0.0.tracks }.filter { seen.insert($0.key).inserted }
+    }
+
+    func moments(in program: DriveProgram, context: DriveContext, resolved: [String:Song], remaining: Double) -> [Moment] {
+        program.cues.flatMap { cue -> [Moment] in
+            guard let match = window(cue,program:program,context:context) else { return [] }
+            if let crossed = crossedAt[cue.id], context.elapsed - crossed + remaining > 300 { return [] }
+            return cue.tracks.compactMap { track in
+                guard let song = resolved[track.key] else { return nil }
+                let perTrack = match.priority == .regional || match.priority == .bookend ? "|" + track.key : ""
+                return Moment(id:"program|\(cue.id)|\(match.phase)" + perTrack,point:context.point,song:song,
+                              reason:cue.reason,source:nil,personal:false,cuePriority:match.priority,estimatedETA:match.eta)
+            }
+        }
+    }
+
+    func musicStyle(in program: DriveProgram, context: DriveContext) -> String? {
+        for cue in program.cues where cue.trigger == .region || cue.trigger == .longStretch {
+            if let style = cue.musicStyle, window(cue,program:program,context:context) != nil { return style }
+        }
+        return nil
+    }
 }
 
 struct DriveContext {
@@ -206,21 +432,27 @@ struct Mix {
             guard moment.song.id != current, !used.contains(moment.id),
                   moment.personal || !recent.contains(moment.song.id) else { return nil }
             let insideArea = moment.areaRadius.map { context.point.distance(to:moment.point) <= $0 } ?? false
-            guard let eta = insideArea ? 0 : context.eta(to:moment.point), eta <= 1200 else { return nil }
+            guard let eta = moment.estimatedETA ?? (insideArea ? 0 : context.eta(to:moment.point)), eta <= 1200 else { return nil }
             return (moment, eta)
         }.sorted {
             if $0.0.personal != $1.0.personal { return $0.0.personal }
+            let first = $0.0.cuePriority?.rawValue ?? 0, second = $1.0.cuePriority?.rawValue ?? 0
+            if first != second { return first > second }
             return abs($0.1 - remaining) < abs($1.1 - remaining)
         }
         let hasFavorites = favorites.contains { $0.song.id != current }
         if let (moment, _) = possible.first(where: { moment, eta in
-            let window = moment.personal ? 65.0 : 100.0
-            return eta <= remaining + window && (moment.personal || familiarSinceDiscovery >= 2 || !hasFavorites)
+            let window = moment.cuePriority == .landmark ? 15.0 : (moment.personal ? 65.0 : 100.0)
+            let explicitCue = (moment.cuePriority?.rawValue ?? 0) > CuePriority.regional.rawValue
+            return eta <= remaining + window && (moment.personal || explicitCue || familiarSinceDiscovery >= 2 || !hasFavorites)
         }) {
             return Pick(song: moment.song, reason: moment.reason, source: moment.source, momentID: moment.id, personal: moment.personal)
         }
 
-        let aim = possible.first(where: { $0.1 > remaining + 65 && ($0.0.personal || familiarSinceDiscovery >= 1) })
+        let aim = possible.first(where: { moment, eta in
+            let landmark = moment.cuePriority == .landmark
+            return eta > remaining + (landmark ? 15 : 65) && (moment.personal || landmark || familiarSinceDiscovery >= 1)
+        })
         let targetEnergy = context.energy
         if aim == nil, familiarSinceDiscovery >= 2 || !hasFavorites,
            let match = roadSongs.first(where: { $0.energy == targetEnergy && $0.song.id != current && !recent.contains($0.song.id) && !used.contains("energy|" + $0.song.id) }) {

@@ -17,6 +17,7 @@ private struct Preferences: Codable {
     var device = ""
     var live = false
     var stories: [Story] = []
+    var selectedProgramName: String?
 }
 struct AirLog: Identifiable {
     let id = UUID()
@@ -52,6 +53,10 @@ final class Station: ObservableObject {
     @Published var researchBusy = false
     @Published var companion = CompanionConfig()
     private var seed: [Story] = []
+    private let bundledProgram: DriveProgram?
+    private let programsKey = "radio.drivePrograms.v1"
+    @Published private var importedPrograms: [DriveProgram] = []
+    private var programDrive = ProgramDrive()
     private var localStories: [Story] = []
     @Published private var routeStories: [Story] = []
     @Published private(set) var lookingAlongRoute = false
@@ -80,6 +85,14 @@ final class Station: ObservableObject {
     init() {
         let data = UserDefaults.standard.data(forKey:prefKey)
         prefs = data.flatMap { try? JSONDecoder().decode(Preferences.self,from:$0) } ?? Preferences()
+        let programData = Bundle.main.url(forResource:"InterstateProgram",withExtension:"json")
+            .flatMap { try? Data(contentsOf:$0) }
+        bundledProgram = programData.flatMap { try? JSONDecoder().decode(DriveProgram.self,from:$0).validated() }
+        let stored = UserDefaults.standard.dictionary(forKey:programsKey) ?? [:]
+        importedPrograms = stored.values.compactMap { value in
+            guard let data = value as? Data else { return nil }
+            return try? JSONDecoder().decode(DriveProgram.self,from:data).validated()
+        }
         if let url = Bundle.main.url(forResource:"Landmarks",withExtension:"json"),
            let data = try? Data(contentsOf:url), let pack = try? JSONDecoder().decode(ResearchPack.self,from:data).validated() { seed = pack.stories }
         if let data = Vault.data("companion"), let config = try? JSONDecoder().decode(CompanionConfig.self,from:data) { companion = config }
@@ -94,6 +107,23 @@ final class Station: ObservableObject {
     var device: String { get { prefs.device } set { prefs.device = newValue; save() } }
     var live: Bool { get { prefs.live } set { prefs.live = newValue; save(); if !newValue { liveTask?.cancel() } } }
     var savedStories: [Story] { prefs.stories }
+    var drivePrograms: [DriveProgram] {
+        var programs = importedPrograms
+        if let bundledProgram, !programs.contains(where:{ $0.name == bundledProgram.name }) { programs.append(bundledProgram) }
+        return programs.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+    var selectedDriveProgram: DriveProgram? {
+        guard let name = prefs.selectedProgramName else { return nil }
+        return importedPrograms.first { $0.name == name } ?? (bundledProgram?.name == name ? bundledProgram : nil)
+    }
+    func selectProgram(_ name: String?) {
+        guard !driving, !starting else { return }
+        prefs.selectedProgramName = name
+        save()
+    }
+    func liveMusicStyle(_ drive: DriveContext) -> String? {
+        selectedDriveProgram.flatMap { programDrive.musicStyle(in:$0,context:drive) }
+    }
     var point: Point? { fix.map { Point($0.coordinate) } }
     var allStories: [Story] {
         var known = Set<String>()
@@ -221,6 +251,7 @@ final class Station: ObservableObject {
             guard marker == generation else { return }
             activeDevice = choice.id; playerName = choice.name; driving = true; starting = false
             startTime = Date(); mix = Mix(); gate = QueueGate(); heldQueueOrigin = nil; current = nil; next = nil; log = []
+            programDrive = ProgramDrive()
             status = "Listening on \(choice.name)"; blockedUntil = .distantPast; lastPoll = .distantPast
             pollAfter = .distantPast; consecutiveErrors = 0
             gps.start(); reloadLibrary(); pulse()
@@ -244,6 +275,7 @@ final class Station: ObservableObject {
         fix = location
         guard driving else { return }
         let p = Point(location.coordinate), token = marker
+        if let program = selectedDriveProgram { programDrive.observe(context(location),program:program) }
         let moved = lastContextPoint.map { $0.distance(to:p) > 5500 } ?? true
         if contextTask == nil && (moved || Date().timeIntervalSince(lastArea) > 600) && Date().timeIntervalSince(lastArea) > 35 {
             lastArea = Date(); lastContextPoint = p
@@ -281,11 +313,18 @@ final class Station: ObservableObject {
     }
     private func resolveNear(_ p: Point) {
         guard lookupTask == nil, Date() >= blockedUntil else { return }
+        let drive = fix.map(context)
+        let soundtrack: [CueTrack]
+        if let drive, let program = selectedDriveProgram { soundtrack = programDrive.preload(in:program,context:drive) }
+        else { soundtrack = [] }
+        let pending = soundtrack.filter { resolved[$0.key] == nil && (lookupAfter[$0.key] ?? .distantPast) <= Date() }
         let nearby = allStories.filter { $0.point.distance(to:p) < 30000 && resolved[$0.id] == nil && (lookupAfter[$0.id] ?? .distantPast) <= Date() }
             .sorted { $0.point.distance(to:p) < $1.point.distance(to:p) }
-        let target = fix.map(context)?.energy ?? .cruise
+        let target = drive?.energy ?? .cruise
         let music = RoadSong.selections.filter { $0.energy == target && resolved[$0.key] == nil && (lookupAfter[$0.key] ?? .distantPast) <= Date() }
-        let lookups = nearby.map { (key:$0.id,title:$0.title,artist:$0.artist) } + music.map { (key:$0.key,title:$0.title,artist:$0.artist) }
+        let lookups = pending.map { (key:$0.key,title:$0.title,artist:$0.artist) } +
+            nearby.map { (key:$0.id,title:$0.title,artist:$0.artist) } +
+            music.map { (key:$0.key,title:$0.title,artist:$0.artist) }
         guard !lookups.isEmpty else { return }
         let token = marker
         lookupTask = Task {
@@ -298,8 +337,12 @@ final class Station: ObservableObject {
                     guard marker == token else { return }
                     if let song { resolved[entry.key] = song }
                 } catch let e as ServiceError where e.status == 429 {
-                    blockedUntil = Date().addingTimeInterval(e.wait); return
-                } catch { return }
+                    guard marker == token else { return }
+                    blockedUntil = Date().addingTimeInterval(e.wait); lookupAfter[entry.key] = blockedUntil; return
+                } catch {
+                    if marker == token { lookupAfter[entry.key] = Date().addingTimeInterval(15) }
+                    return
+                }
             }
         }
     }
@@ -345,6 +388,9 @@ final class Station: ObservableObject {
         guard gate.ready(current:song.id,remaining:state.remaining),
               let fix, abs(fix.timestamp.timeIntervalSinceNow) < 75 else { return }
         let drive = context(fix)
+        let cues = selectedDriveProgram.map {
+            programDrive.moments(in:$0,context:drive,resolved:resolved,remaining:state.remaining)
+        } ?? []
         let personal = pins.map { Moment(id:$0.id.uuidString,point:$0.point,song:$0.song,reason:$0.note.isEmpty ? "Your pin at \($0.place)." : $0.note,source:nil,personal:true) }
         let nearby = allStories.compactMap { story -> Moment? in
             guard let song = resolved[story.id] else { return nil }
@@ -353,7 +399,7 @@ final class Station: ObservableObject {
         let roadSongs = RoadSong.selections.compactMap { selection in
             resolved[selection.key].map { Favorite(song:$0,energy:selection.energy) }
         }
-        guard let pick = mix.choose(context:drive,current:song.id,remaining:state.remaining,moments:personal+nearby,
+        guard let pick = mix.choose(context:drive,current:song.id,remaining:state.remaining,moments:personal+cues+nearby,
                                     favorites:favorites,roadSongs:roadSongs) else { return }
         gate.reserve(pick,from:song.id,now:Date()); heldQueueOrigin = song.id
         do { try await spotify.enqueue(pick.song,device:activeDevice) }
@@ -388,8 +434,22 @@ final class Station: ObservableObject {
         let scoped = url.startAccessingSecurityScopedResource(); defer { if scoped { url.stopAccessingSecurityScopedResource() } }
         do {
             guard (try url.resourceValues(forKeys:[.fileSizeKey]).fileSize ?? Int.max) <= 160_000 else { throw RadioError("Choose a trip JSON file smaller than 160 KB.") }
-            let pack = try JSONDecoder().decode(ResearchPack.self,from:Data(contentsOf:url)).validated()
-            merge(pack)
+            let data = try Data(contentsOf:url)
+            guard data.count <= 160_000 else { throw RadioError("Choose a trip JSON file smaller than 160 KB.") }
+            let contents = try JSONSerialization.jsonObject(with:data) as? [String:Any]
+            if contents?["cues"] != nil {
+                guard !driving, !starting else { throw RadioError("End this drive before importing a new route soundtrack.") }
+                let program = try JSONDecoder().decode(DriveProgram.self,from:data).validated()
+                var stored = UserDefaults.standard.dictionary(forKey:programsKey) ?? [:]
+                stored[program.name] = data
+                UserDefaults.standard.set(stored,forKey:programsKey)
+                importedPrograms.removeAll { $0.name == program.name }
+                importedPrograms.append(program)
+                selectProgram(program.name)
+                researchStatus = "\(program.name) is ready in Drive."
+            } else {
+                merge(try JSONDecoder().decode(ResearchPack.self,from:data).validated())
+            }
         } catch { notice = error.localizedDescription }
     }
     func researchTrip(_ places: [String]) async {

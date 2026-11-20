@@ -101,6 +101,23 @@ private struct DriveScreen: View {
                     } label: { Label(station.routeBusy ? "Finding route…" : (station.route == nil ? "Plan a drive" : "Change destination"),systemImage:"map") }
                     .disabled(station.routeBusy)
                 }
+                if !station.drivePrograms.isEmpty {
+                    VStack(alignment:.leading,spacing:8) {
+                        Text("Soundtrack").font(editorial(26))
+                        Picker("Route soundtrack",selection:Binding(get:{ station.selectedDriveProgram?.name ?? "" },set:{ station.selectProgram($0.isEmpty ? nil : $0) })) {
+                            Text("Everyday station").tag("")
+                            ForEach(station.drivePrograms,id:\.name) { program in Text(program.name).tag(program.name) }
+                        }
+                        .pickerStyle(.menu).labelsHidden().disabled(station.driving || station.starting)
+                        if let program = station.selectedDriveProgram ?? station.drivePrograms.first {
+                            NavigationLink {
+                                DriveProgramPreview(program:program)
+                            } label: {
+                                Label("Preview " + program.name,systemImage:"music.note.list").font(.subheadline)
+                            }
+                        }
+                    }
+                }
                 VStack(alignment:.leading) {
                     Text("Energy").font(editorial(26))
                     Picker("Energy",selection:Binding(get:{station.energy},set:{station.energy = $0})) {
@@ -126,6 +143,35 @@ private struct DriveScreen: View {
     private func duration(_ seconds: Double) -> String {
         let minutes = Int(seconds / 60)
         return minutes >= 60 ? "\(minutes / 60) h \(minutes % 60) min" : "\(max(1,minutes)) min"
+    }
+}
+
+private struct DriveProgramPreview: View {
+    let program: DriveProgram
+    @EnvironmentObject var station: Station
+    var body: some View {
+        List {
+            Section {
+                if station.selectedDriveProgram?.name == program.name {
+                    Label("Selected for this drive",systemImage:"checkmark.circle.fill")
+                } else {
+                    Button("Use this soundtrack") { station.selectProgram(program.name) }
+                        .disabled(station.driving || station.starting)
+                }
+            } footer: {
+                Text("The DJ follows your location and queues each cue at a song break. Personal pins take priority.")
+            }
+            ForEach(program.cues,id:\.id) { cue in
+                Section {
+                    ForEach(cue.tracks,id:\.key) { track in
+                        VStack(alignment:.leading,spacing:2) {
+                            Text(track.title).font(.headline)
+                            Text(track.artist).font(.subheadline).foregroundStyle(.secondary)
+                        }
+                    }
+                } header: { Text(cue.label) } footer: { Text(cue.reason) }
+            }
+        }.navigationTitle(program.name).navigationBarTitleDisplayMode(.inline)
     }
 }
 

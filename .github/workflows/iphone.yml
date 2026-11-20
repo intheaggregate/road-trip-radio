@@ -18,6 +18,11 @@ jobs:
         run: |
           swift test --parallel
           python3 -m unittest discover -s Companion -p 'test_*.py' -v
+      - name: Verify ChatGPT login with a local test issuer
+        run: |
+          openssl genrsa -out "$RUNNER_TEMP/login-test.pem" 2048
+          swiftc -swift-version 5 App/CloudLogin.swift scripts/VerifyCloudLogin.swift -o "$RUNNER_TEMP/check-login"
+          "$RUNNER_TEMP/check-login" "$RUNNER_TEMP/login-test.pem"
       - name: Build iPhone package
         run: bash scripts/package-ios.sh "$RUNNER_TEMP/radio"
       - uses: actions/upload-artifact@v4

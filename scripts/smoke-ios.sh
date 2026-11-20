@@ -20,7 +20,13 @@ xcrun simctl boot "$device" || xcrun simctl bootstatus "$device" -b
 xcodebuild -project RoadTripRadio.xcodeproj -scheme RoadTripRadio -configuration Debug \
   -sdk iphonesimulator -destination "id=$device" -derivedDataPath "$out/sim" build
 xcrun simctl bootstatus "$device" -b
-xcrun simctl install "$device" "$out/sim/Build/Products/Debug-iphonesimulator/RoadTripRadio.app"
+sim_app="$out/sim/Build/Products/Debug-iphonesimulator/RoadTripRadio.app"
+# Exercise a filled-in station using the same resource that the personal kit supplies.
+cat > "$sim_app/InterstateProgram.json" <<'JSON'
+{"version":1,"name":"Demo drive","cues":[{"id":"demo","trigger":"departure","label":"Starting point","reason":"A departure song.","tracks":[{"title":"Test song","artist":"Test musician"}],"path":[{"latitude":10,"longitude":10}],"radius":4000}]}
+JSON
+codesign --force --sign - "$sim_app"
+xcrun simctl install "$device" "$sim_app"
 xcrun swiftc scripts/VerifyScreen.swift -o "$out/check-screen"
 xcrun simctl launch "$device" app.roadtripradio.personal
 for attempt in 1 2 3 4 5; do
