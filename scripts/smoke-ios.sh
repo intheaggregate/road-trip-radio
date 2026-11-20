@@ -1,13 +1,32 @@
 #!/usr/bin/env bash
 set -euo pipefail
 out="$1"
-device="$(xcrun simctl list devices available -j | python3 -c 'import json,sys; print(next(d["udid"] for k,ds in reversed(list(json.load(sys.stdin)["devices"].items())) if "iOS" in k for d in ds if "iPhone" in d["name"]))')"
+sdk="$(xcrun --sdk iphonesimulator --show-sdk-version)"
+device="$(xcrun simctl list devices available -j | python3 -c '
+import json, re, sys
+limit = tuple(map(int, sys.argv[1].split(".")))
+candidates = []
+for runtime, devices in json.load(sys.stdin)["devices"].items():
+    match = re.search(r"\.iOS-([0-9-]+)$", runtime)
+    if not match:
+        continue
+    version = tuple(map(int,match[1].split("-")))
+    if (17,) <= version <= limit:
+        candidates.extend((version, d["name"] == "iPhone 16 Pro", d["udid"]) for d in devices if "iPhone" in d["name"])
+if not candidates:
+    sys.exit("No compatible iPhone simulator for selected Xcode SDK " + sys.argv[1])
+print(max(candidates)[2])' "$sdk")"
 xcrun simctl boot "$device" || xcrun simctl bootstatus "$device" -b
 xcodebuild -project RoadTripRadio.xcodeproj -scheme RoadTripRadio -configuration Debug \
   -sdk iphonesimulator -destination "id=$device" -derivedDataPath "$out/sim" build
 xcrun simctl bootstatus "$device" -b
 xcrun simctl install "$device" "$out/sim/Build/Products/Debug-iphonesimulator/RoadTripRadio.app"
+xcrun swiftc scripts/VerifyScreen.swift -o "$out/check-screen"
 xcrun simctl launch "$device" app.roadtripradio.personal
-sleep 4
-xcrun simctl io "$device" screenshot "$out/Drive.png"
-test -s "$out/Drive.png"
+for attempt in 1 2 3 4 5; do
+  sleep 4
+  xcrun simctl io "$device" screenshot "$out/Drive.png"
+  if "$out/check-screen" "$out/Drive.png"; then exit 0; fi
+done
+echo "The iPhone did not display the Drive screen." >&2
+exit 1

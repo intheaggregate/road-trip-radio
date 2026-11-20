@@ -77,6 +77,17 @@ final class RadioTests: XCTestCase {
         gate.observe(current:"pin",queue:nil,now:now.addingTimeInterval(150))
         XCTAssertTrue(gate.ready(current:"pin",remaining:35))
     }
+    func testWeatherChangesDiscoveryOnAnUnmappedRoadWithUntaggedLikes() {
+        var drive = context()
+        let library = [Favorite(song:song("liked"),energy:.automatic)]
+        let road = [Favorite(song:song("sunny"),energy:.cruise), Favorite(song:song("soft"),energy:.mellow)]
+        var mix = Mix()
+        XCTAssertEqual(mix.choose(context:drive,current:"now",remaining:20,moments:[],favorites:library,roadSongs:road)?.song.id,"sunny")
+        drive.wet = true
+        let rainy = mix.choose(context:drive,current:"now",remaining:20,moments:[],favorites:library,roadSongs:road)!
+        XCTAssertEqual(rainy.song.id,"soft"); mix.record(rainy)
+        XCTAssertEqual(mix.choose(context:drive,current:"now",remaining:20,moments:[],favorites:library,roadSongs:road)?.song.id,"liked")
+    }
     func testLostWriteSkipsMissedCueOnReconnect() {
         var gate = QueueGate()
         let now = Date()

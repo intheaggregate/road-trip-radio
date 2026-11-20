@@ -4,7 +4,7 @@ A personal iPhone DJ for Spotify Premium. Tap **Start drive** to follow your loc
 
 ## Install on your iPhone from Windows
 
-1. Get **RoadTripRadio.ipa** from the latest successful **Build iPhone app** run under **Actions → Artifacts → RoadTripRadio-iPhone**. Extract the downloaded ZIP once. The device package targets iPhone with iOS 17 or later. [Builds](https://github.com/intheaggregate/road-trip-radio/actions/workflows/iphone.yml)
+1. Extract the Windows kit and locate **RoadTripRadio.ipa**. It runs on iPhone with iOS 17 or later. To get a fresh copy from GitHub, open the latest successful **Build iPhone app** run and download **Artifacts → RoadTripRadio-iPhone**. Extract that ZIP once. [Builds](https://github.com/intheaggregate/road-trip-radio/actions/workflows/iphone.yml)
 2. Install AltServer on Windows and AltStore Classic on the iPhone. Trust the PC, enable Wi-Fi sync, and enable Developer Mode on the phone when prompted. Sign the installation with your own Apple account. [AltStore’s Windows guide](https://faq.altstore.io/altstore-classic/how-to-install-altstore-windows)
 3. Open the IPA from Files with AltStore, or tap **+** in AltStore’s **My Apps**. A free Apple account requires refreshing within seven days through AltServer on your PC. Refresh before a long trip. [AltStore refresh guide](https://faq.altstore.io/altstore-classic/your-altstore)
 
@@ -16,15 +16,19 @@ A personal iPhone DJ for Spotify Premium. Tap **Start drive** to follow your loc
 
 ## First drive
 
-Open **Places → Pin a song**, find a landmark or tap the map, and choose a track. On the **Drive** tab, tap **Start drive** and grant location access. For a planned trip, use **Plan a drive** first. A location fix is needed to calculate the route.
+Open **Places → Pin a song**, find a landmark or tap the map, and choose a track. On the **Drive** tab, tap **Start drive** and grant location access. For a planned trip, use **Plan a drive** first. A location fix is needed to calculate the route. When local discoveries are available, the mix aims for two familiar songs between discoveries. Personal pins have priority.
 
 The app requests location updates for the duration of the drive, including while locked. It predicts when you will reach a place, selects filler songs by duration, and adds at most one of its own picks to the Spotify queue. Spotify honors the playback queue, so songs you already queued and last-minute detours can affect the timing. Pausing in Spotify pauses the DJ. **End drive** ends GPS tracking and future selections. Spotify can finish music already queued. MusicBrainz coverage varies by region, and the station falls back to your rotation. [Apple background location](https://developer.apple.com/documentation/corelocation/handling-location-updates-in-the-background) · [Spotify's queue](https://developer.spotify.com/documentation/web-api/reference/add-to-queue)
+
+On stretches with few local music credits, a small set of handpicked songs supplies occasional mellow, cruising, or upbeat discoveries. This lets rain or nightfall change the station even if your Liked Songs have no energy labels.
 
 ## Optional research with your ChatGPT allowance
 
 The Windows companion runs the official Codex CLI under your own ChatGPT sign-in. It asks for music connected to named places, checks a supporting passage against each source page, and sends compact song suggestions to the phone. Lookup failures and usage limits leave the normal DJ available. The helper requires Python 3.11+ and the Codex CLI. Check your sign-in with **codex login status**. [Codex non-interactive mode](https://developers.openai.com/codex/noninteractive)
 
 **Prepare a trip before departure.** From the project folder on Windows, run the following command and share the resulting JSON file to your iPhone. Open **Places → Import trip file**. The phone stores the suggestions for use along the route.
+
+The Windows kit includes **Memphis-to-Muscle-Shoals.roadtrip.json** with five sourced picks. Save it in the iPhone Files app and import it to try this feature before preparing your own route.
 
 ~~~powershell
 python Companion/research.py pack --place "Winslow, Arizona" --place "Flagstaff, Arizona" --output route.roadtrip.json

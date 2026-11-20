@@ -194,10 +194,19 @@ final class Station: ObservableObject {
     func start() async {
         guard !starting, !driving else { return }
         guard connected else { notice = "Connect your Spotify account in Settings first."; return }
-        guard [.authorizedAlways,.authorizedWhenInUse].contains(gps.manager.authorizationStatus) else { gps.request(); notice = "Allow location access, then tap Start again."; return }
         let generation = marker
         starting = true; defer { if marker == generation { starting = false } }
         do {
+            if gps.manager.authorizationStatus == .notDetermined {
+                gps.request()
+                while gps.manager.authorizationStatus == .notDetermined {
+                    try await Task.sleep(nanoseconds:250_000_000)
+                    guard marker == generation else { return }
+                }
+            }
+            guard [.authorizedAlways,.authorizedWhenInUse].contains(gps.manager.authorizationStatus) else {
+                throw RadioError("To follow this drive, enable Location While Using in iPhone Settings.")
+            }
             let state = try await spotify.player()
             let available = try await spotify.devices()
             guard marker == generation else { return }
@@ -274,17 +283,20 @@ final class Station: ObservableObject {
         guard lookupTask == nil, Date() >= blockedUntil else { return }
         let nearby = allStories.filter { $0.point.distance(to:p) < 30000 && resolved[$0.id] == nil && (lookupAfter[$0.id] ?? .distantPast) <= Date() }
             .sorted { $0.point.distance(to:p) < $1.point.distance(to:p) }
-        guard !nearby.isEmpty else { return }
+        let target = fix.map(context)?.energy ?? .cruise
+        let music = RoadSong.selections.filter { $0.energy == target && resolved[$0.key] == nil && (lookupAfter[$0.key] ?? .distantPast) <= Date() }
+        let lookups = nearby.map { (key:$0.id,title:$0.title,artist:$0.artist) } + music.map { (key:$0.key,title:$0.title,artist:$0.artist) }
+        guard !lookups.isEmpty else { return }
         let token = marker
         lookupTask = Task {
             defer { if marker == token { lookupTask = nil } }
-            for story in nearby.prefix(4) {
+            for entry in lookups.prefix(4) {
                 guard !Task.isCancelled, marker == token else { return }
-                lookupAfter[story.id] = Date().addingTimeInterval(300)
+                lookupAfter[entry.key] = Date().addingTimeInterval(300)
                 do {
-                    let song = try await spotify.resolve(story)
+                    let song = try await spotify.resolve(title:entry.title,artist:entry.artist)
                     guard marker == token else { return }
-                    if let song { resolved[story.id] = song }
+                    if let song { resolved[entry.key] = song }
                 } catch let e as ServiceError where e.status == 429 {
                     blockedUntil = Date().addingTimeInterval(e.wait); return
                 } catch { return }
@@ -293,9 +305,12 @@ final class Station: ObservableObject {
     }
     private func context(_ location: CLLocation) -> DriveContext {
         let localHour = Calendar.current.component(.hour,from:Date())
-        return DriveContext(point:Point(location.coordinate), speed:max(0,location.speed), heading:location.course >= 0 ? location.course:nil,
+        let currentPoint = Point(location.coordinate)
+        let nearbyWeather = weatherPoint.map { currentPoint.distance(to:$0) < 50000 } ?? false
+        let weather = nearbyWeather && Date().timeIntervalSince(weatherAt) < 3600 ? conditions : nil
+        return DriveContext(point:currentPoint, speed:max(0,location.speed), heading:location.course >= 0 ? location.course:nil,
                             road:route?.road, elapsed:Date().timeIntervalSince(startTime), requested:energy,
-                            wet:conditions?.wet ?? false,daylight:conditions?.day ?? (7..<19).contains(localHour))
+                            wet:weather?.wet ?? false,daylight:weather?.day ?? (7..<19).contains(localHour))
     }
     func pulse() {
         guard driving, tickTask == nil, Date() >= max(blockedUntil,pollAfter), Date().timeIntervalSince(lastPoll) >= 7 else { return }
@@ -335,7 +350,11 @@ final class Station: ObservableObject {
             guard let song = resolved[story.id] else { return nil }
             return Moment(id:story.id,point:story.point,song:song,reason:story.reason,source:URL(string:story.source),personal:false,areaRadius:story.areaRadius)
         }
-        guard let pick = mix.choose(context:drive,current:song.id,remaining:state.remaining,moments:personal+nearby,favorites:favorites) else { return }
+        let roadSongs = RoadSong.selections.compactMap { selection in
+            resolved[selection.key].map { Favorite(song:$0,energy:selection.energy) }
+        }
+        guard let pick = mix.choose(context:drive,current:song.id,remaining:state.remaining,moments:personal+nearby,
+                                    favorites:favorites,roadSongs:roadSongs) else { return }
         gate.reserve(pick,from:song.id,now:Date()); heldQueueOrigin = song.id
         do { try await spotify.enqueue(pick.song,device:activeDevice) }
         catch {

@@ -217,15 +217,15 @@ final class Spotify: NSObject, ASWebAuthenticationPresentationContextProviding {
         let json = try await call("search",query:["q":text,"type":"track","limit":"10"])
         return ((json["tracks"] as? Object)?["items"] as? [Object] ?? []).compactMap(Song.init(spotify:))
     }
-    func resolve(_ story: Story) async throws -> Song? {
-        let raw = try await search("track:" + story.title + " artist:" + story.artist)
+    func resolve(title requestedTitle: String, artist: String) async throws -> Song? {
+        let raw = try await search("track:" + requestedTitle + " artist:" + artist)
         func normal(_ text: String) -> String {
             text.folding(options:[.diacriticInsensitive,.caseInsensitive],locale:Locale(identifier:"en_US_POSIX"))
                 .components(separatedBy:CharacterSet.alphanumerics.inverted).joined()
         }
         return raw.first { song in
             let title = song.title.components(separatedBy:" - ").first ?? song.title
-            return (normal(song.title) == normal(story.title) || normal(title) == normal(story.title)) && normal(song.artist) == normal(story.artist)
+            return (normal(song.title) == normal(requestedTitle) || normal(title) == normal(requestedTitle)) && normal(song.artist) == normal(artist)
         }
     }
     func lists() async throws -> [LibraryList] {

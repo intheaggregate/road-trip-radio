@@ -114,6 +114,21 @@ struct Favorite {
     let energy: Energy
 }
 
+struct RoadSong {
+    let title: String
+    let artist: String
+    let energy: Energy
+    static let selections = [
+        RoadSong(title:"Come Away With Me",artist:"Norah Jones",energy:.mellow),
+        RoadSong(title:"Harvest Moon",artist:"Neil Young",energy:.mellow),
+        RoadSong(title:"Lovely Day",artist:"Bill Withers",energy:.cruise),
+        RoadSong(title:"Dreams",artist:"Fleetwood Mac",energy:.cruise),
+        RoadSong(title:"Move On Up",artist:"Curtis Mayfield",energy:.upbeat),
+        RoadSong(title:"Walking On Sunshine",artist:"Katrina & The Waves",energy:.upbeat)
+    ]
+    var key: String { "road-music|" + artist + "|" + title }
+}
+
 struct Moment {
     let id: String
     let point: Point
@@ -186,7 +201,7 @@ struct Mix {
         if recent.count > 40 { recent.removeFirst() }
     }
 
-    func choose(context: DriveContext, current: String, remaining: Double, moments: [Moment], favorites: [Favorite]) -> Pick? {
+    func choose(context: DriveContext, current: String, remaining: Double, moments: [Moment], favorites: [Favorite], roadSongs: [Favorite] = []) -> Pick? {
         let possible = moments.compactMap { moment -> (Moment, Double)? in
             guard moment.song.id != current, !used.contains(moment.id),
                   moment.personal || !recent.contains(moment.song.id) else { return nil }
@@ -207,6 +222,17 @@ struct Mix {
 
         let aim = possible.first(where: { $0.1 > remaining + 65 && ($0.0.personal || familiarSinceDiscovery >= 1) })
         let targetEnergy = context.energy
+        if aim == nil, familiarSinceDiscovery >= 2 || !hasFavorites,
+           let match = roadSongs.first(where: { $0.energy == targetEnergy && $0.song.id != current && !recent.contains($0.song.id) && !used.contains("energy|" + $0.song.id) }) {
+            let reason: String
+            if context.requested != .automatic { reason = "A pick for your " + targetEnergy.rawValue.lowercased() + " drive." }
+            else if context.wet { reason = "A quieter pick for the rain." }
+            else if !context.daylight { reason = "A mellow pick for the road after dark." }
+            else if context.nearArrival { reason = "An upbeat pick for the last stretch." }
+            else if context.elapsed > 5400 { reason = "A lift after a long stretch on the road." }
+            else { reason = "An easygoing pick for the open road." }
+            return Pick(song:match.song,reason:reason,momentID:"energy|" + match.song.id)
+        }
         func cost(_ item: Favorite) -> Double {
             var score = 0.0
             if let index = recent.lastIndex(of: item.song.id) { score += 1500 + Double(index) * 12 }
